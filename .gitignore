@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environments and secrets
+.venv/
+venv/
+.env
+
+# Data, checkpoints, language models, logs
+data/
+data_sources/
+datasets/
+runs/
+*.pt
+*.arpa
+*.zip
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+
+benchmarks/
+docs/
+
+# site-specific SLURM scripts
+*.local.slurm

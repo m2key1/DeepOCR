@@ -1,0 +1,17 @@
+# Minimal set for infer.py / inference.ipynb. Install torch for your platform first if you need a
+# specific CUDA build (https://pytorch.org/get-started).
+torch
+torchvision
+torchaudio
+transformers==5.2.0    # imported on every load; used only by the dinov3 and trocr backbones
+albumentationsx[contrib]
+opencv-python-headless
+numpy
+pillow
+matplotlib
+tqdm
+jiwer
+tensorboard
+
+# CTC beam search with a fused KenLM (transcribe_beam)
+flashlight-text

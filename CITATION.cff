@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "DeepOCR"
+abstract: "Text-line recognition for historical printed and handwritten documents with a CNN backbone, a Mixture-of-Experts transformer encoder, CTC and autoregressive decoding heads, and KenLM-fused beam search."
+authors:
+  - family-names: Fleischhacker
+    given-names: David
+repository-code: "https://github.com/m2key1/DeepOCR"
+license: Apache-2.0
+keywords:
+  - OCR
+  - HTR
+  - handwritten text recognition
+  - historical documents
+  - mixture of experts
+  - CTC

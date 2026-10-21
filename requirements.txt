@@ -1,0 +1,26 @@
+# PyTorch wheels are pulled from the CUDA 13.0 index below. For another CUDA version or CPU-only,
+# drop the extra index and install torch/torchvision/torchaudio per https://pytorch.org/get-started
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch
+torchvision
+torchaudio
+
+# model and training
+transformers==5.2.0    # used only by the dinov3 and trocr backbones
+albumentationsx[contrib]
+opencv-python-headless
+pillow
+numpy
+matplotlib
+tqdm
+jiwer
+tensorboard
+
+# KenLM-fused CTC beam search; building LMs also needs the KenLM binaries (lmplz, build_binary)
+flashlight-text
+
+# data preparation (utils/prepare_data.py, scripts/download_hf_dataset.py)
+label_studio_sdk
+requests
+python-dotenv
+datasets
