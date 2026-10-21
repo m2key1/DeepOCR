@@ -196,10 +196,9 @@ class SwiGLUExpert(nn.Module):
 class SwiGLUExperts(nn.Module):
     """All routed SwiGLU experts of one block as stacked weights, one grouped matmul per projection.
 
-    The grouped cost does not depend on routing imbalance, which is high early in training: at 2048
-    tokens with the busiest expert at 7x the mean, forward and backward took 23.3 ms through a
-    per-expert loop and 5.3 ms grouped. A batched matmul padded to the busiest expert cost 209 ms
-    per full-model step. Without CUDA the loop is used."""
+    The grouped cost does not depend on routing imbalance, which is high early in training, whereas
+    a per-expert loop or a batched matmul padded to the busiest expert pays for it. Without CUDA the
+    loop is used."""
 
     def __init__(self, num_experts: int, d_model: int, hidden: int):
         super().__init__()
@@ -664,9 +663,9 @@ class DeepOCR(nn.Module):
             self.feature_projection = nn.Linear(self.feature_dim * self.grid_height, self.d_model)
             self.pos_encoder = PositionalEncoding(d_model=self.d_model, max_len=self.max_seq_len, dropout=0.1)
 
-        # gt4histocr keeps long s on 68.8% of its lines while the other 1.4M lines write plain s.
-        # A per-line convention flag gives the same glyph two correct targets instead of one
-        # contradictory one. Zeros mean the normalized convention, the inference default.
+        # Corpora disagree on long s; a per-line convention flag gives the same glyph two correct
+        # targets instead of one contradictory one. Zeros mean the normalized convention, the
+        # inference default.
         self.convention_names = list(convention_names or ())
         self.convention_by_dataset = dict(convention_by_dataset or {})
         self.convention_proj = (nn.Linear(len(self.convention_names), self.d_model, bias=False)
@@ -1556,7 +1555,7 @@ class DeepOCR(nn.Module):
                     total_loss += batch_loss_float
                     num_batches += 1
 
-                    # at ~2,300 steps an epoch, full-rate curves are unreadable and dominate the event file
+                    # full-rate curves are unreadable and dominate the event file
                     if is_master and writer and global_step % scalar_log_interval == 0:
                         writer.add_scalar('Loss/train_batch_total', batch_loss_float, global_step)
                         writer.add_scalar('Loss/train_batch_ctc', ctc_loss.detach().item(), global_step)
@@ -1983,7 +1982,7 @@ class DeepOCR(nn.Module):
                     all_rescored_preds.extend(rescored_batch)
 
                 if writer and epoch is not None and batch_idx == random_batch_index:
-                    # the default 8 per row put four 4.8k-wide lines into an unreadable 19146x260 strip
+                    # one per row, since lines side by side are too wide to read
                     img_grid = torchvision.utils.make_grid(to_display_image(images[:4]), nrow=1)
                     writer.add_image('Images/validation_samples', img_grid, epoch)
                     if log_attention:

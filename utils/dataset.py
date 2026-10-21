@@ -22,9 +22,8 @@ from utils.tokenizer import DeepTokenizer, canonicalize
 
 
 def worker_init(worker_id: int) -> None:
-    # OpenCV defaults to 24 threads per process, so 8 ranks x 12 spawn-context workers would ask
-    # for 2304 of them on a 96-core allocation. The augmentation work does not parallelise anyway
-    # (36.64 ms/line at one thread against 35.08 unrestricted), so the threads are pure contention.
+    # OpenCV's per-process thread pool multiplies across ranks x workers, and the augmentation work
+    # does not parallelise, so the threads are pure contention.
     cv2.setNumThreads(0)
 
 
@@ -234,7 +233,7 @@ class OCRDataset(Dataset):
         return derive_dataset_label(source, self.dataset_sources)
 
     def _pairs_cache_key(self) -> str:
-        """Hashes every input that affects (pairs, labels, widths). Stat-ing ~2.2M files is too
+        """Hashes every input that affects (pairs, labels, widths). Stat-ing every file is too
         slow, so the split directory's own mtime and size stand in for its contents."""
         try:
             st = os.stat(self.data_dir)
@@ -343,7 +342,7 @@ class OCRDataset(Dataset):
                         continue
 
                 valid_paths.append((image_path, selected_text_path))
-                # Without the early stop a limited run still walks all ~1.9M entries. A shuffled
+                # Without the early stop a limited run still walks every entry. A shuffled
                 # limit needs the full list to draw a subset across datasets.
                 if self.limit and not self.shuffle_before_limit and len(valid_paths) >= self.limit:
                     break

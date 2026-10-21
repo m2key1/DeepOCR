@@ -3,6 +3,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import sys
 import xml.etree.ElementTree as ET
@@ -24,6 +25,10 @@ from utils.tokenizer import canonicalize
 load_dotenv(".env")
 
 MIN_LINE_HEIGHT = 8
+PAGE_IN_NAME = re.compile(r'^(.*?page[_-]?\d+)', re.IGNORECASE)
+NUMBERED_LINE = re.compile(r'^\d+$')
+# GT4HistOCR numbers lines per book with no page id; consecutive blocks stand in for pages
+LINES_PER_NUMBERED_PAGE = 30
 IMAGE_LINK_MODE = 'hardlink'    # 'hardlink' | 'symlink' | 'copy'
 
 
@@ -101,8 +106,7 @@ def _crop_polygon_minrect(page_img: Image.Image, polygon: list[tuple[int, int]],
     """Crops the polygon's minimum-area rectangle, deskewed to horizontal.
 
     Every crop is resized to a fixed height, so a skewed line's taller axis-aligned box costs
-    glyph resolution: over 1,200 kurrent_01 pages AABB / min-rect height is 1.148 at the median
-    and 1.968 at p90. Only a padded patch around the rectangle is rotated, not the page."""
+    glyph resolution. Only a padded patch around the rectangle is rotated, not the page."""
     pts = np.asarray(polygon, dtype=np.float32)
     (cx, cy), (w, h), angle = cv2.minAreaRect(pts)
     if w < h:                       # make the long side horizontal
@@ -328,7 +332,7 @@ def process_page_xml_dataset(root_dir: str | Path, output_dir: Path, image_exten
         and not _is_junk_path(path)
     )
 
-    # Crops are deterministic; without this every prepare run re-cropped ~127k identical lines.
+    # Crops are deterministic, so an existing output is reused rather than re-cropped.
     existing = output_dir / dataset_name
     if existing.is_dir():
         done = sum(1 for _ in existing.rglob('*.gt.txt'))
@@ -375,8 +379,7 @@ def is_page_xml_dataset(root_path: Path, sample_size: int = 80, image_extensions
             return False
         return bool(regions) and _resolve_page_image(xml_path, image_filename, image_extensions, stem_index) is not None
 
-    # The Dutch VOC record has ~1M transcription-only pages around a few thousand with scans, so a
-    # blind sample almost never hits one; try the image-bearing stems first.
+    # Transcription-only pages can far outnumber scanned ones; try the image-bearing stems first.
     checked = 0
     for xml_path in root_path.rglob('*.xml'):
         if _skip(xml_path) or xml_path.stem not in img_stems:
@@ -560,8 +563,8 @@ def find_image_text_pairs(root_dir: str | Path,
     return pairs
 
 
-# Catches only a correction that is prose, truncated or empty, not hallucination: a fabricated
-# digit ('20.' -> '120.') scores 0.050, real fixes 0.054-0.077, so no lower threshold separates them.
+# Catches only a correction that is prose, truncated or empty. A fabricated digit scores like a real
+# fix, so no lower threshold separates hallucination.
 CORRECTION_MAX_EDIT_RATIO = float(os.environ.get('PREP_CORRECTION_MAX_EDIT', 0.60))
 
 
@@ -583,10 +586,9 @@ def _edit_ratio(a: str, b: str) -> float:
 def _select_text_variant(candidates: list[Path]) -> Path | None:
     """Picks one ground truth per image: .gt.txt, then .corrected.txt, then .txt.
 
-    Emitting every variant gave the same pixels conflicting targets (41.9% of one corpus's .txt and
-    .corrected.txt disagree). .corrected.txt is a post-corrected transcription; checked
-    against the images, it keeps period spelling the raw transcriber modernised (hauendo, not
-    havendo), so it wins unless it fails the CORRECTION_MAX_EDIT_RATIO guard."""
+    Emitting every variant would give the same pixels conflicting targets. .corrected.txt keeps
+    period spelling the raw transcriber modernised (hauendo, not havendo), so it wins unless it
+    fails the CORRECTION_MAX_EDIT_RATIO guard."""
     by_ext = {}
     for cand in candidates:
         for ext in ('.gt.txt', '.corrected.txt', '.txt', '.xml'):
@@ -692,13 +694,43 @@ def _pair_matches_sources(pair: tuple[Path, Path, str], sources: list[str]) -> b
     return False
 
 
+def _page_key(image_path: Path) -> str:
+    """Falls back to the line itself when the file name carries no page."""
+    stem = image_path.stem
+    if match := PAGE_IN_NAME.match(stem):
+        return f"{image_path.parent}/{match.group(1)}"
+    if NUMBERED_LINE.match(stem):
+        return f"{image_path.parent}/{int(stem) // LINES_PER_NUMBERED_PAGE}"
+    return str(image_path)
+
+
+def _page_xml_keys(root_path: Path, crop_root: Path, pairs: list[tuple[Path, Path, str]]) -> dict[Path, str]:
+    """Crops are named <page xml stem>_<line id> in a mirror of the xml's folder, so the longest
+    xml stem that prefixes a crop name is its page."""
+    stems_by_dir: dict[Path, set[str]] = {}
+    keys = {}
+    for image_path, _, _ in pairs:
+        crop_dir = image_path.parent
+        if crop_dir not in stems_by_dir:
+            source_dir = root_path / crop_dir.relative_to(crop_root)
+            stems_by_dir[crop_dir] = {xml.stem for xml in source_dir.glob('*.xml')}
+        stems = stems_by_dir[crop_dir]
+        parts = image_path.stem.split('_')
+        prefixes = ('_'.join(parts[:end]) for end in range(len(parts) - 1, 0, -1))
+        page = next((prefix for prefix in prefixes if prefix in stems), image_path.stem)
+        keys[image_path] = f"{crop_dir}/{page}"
+    return keys
+
+
 def stratified_split(
     pairs: list[tuple[Path, Path, str]],
     train_ratio: float = 0.9,
     seed: int = 42,
-    valid_sources: list[str] | None = None
+    valid_sources: list[str] | None = None,
+    page_keys: dict[Path, str] | None = None
 ) -> tuple[list, list]:
-    """Splits pairs into train and valid per folder, keeping every crop of an image together.
+    """Splits pairs into train and valid per folder by page, so validation measures pages the
+    model has not seen rather than unseen lines of pages it trained on.
 
     When valid_sources is given, only pairs whose source path contains one of those substrings
     are eligible for the validation split; every other pair goes entirely to training."""
@@ -716,6 +748,7 @@ def stratified_split(
             print("WARNING: no pairs matched valid_sources; validation set will be empty.")
     else:
         eligible, train_only = pairs, []
+    page_keys = page_keys or {}
 
     folder_groups = defaultdict(list)
     for pair in eligible:
@@ -723,12 +756,13 @@ def stratified_split(
 
     train_pairs, valid_pairs = [], []
     for folder_pairs in folder_groups.values():
-        image_groups = defaultdict(list)
+        page_groups = defaultdict(list)
         for pair in folder_pairs:
-            image_groups[pair[0]].append(pair)
-        grouped = list(image_groups.values())
+            page_groups[page_keys.get(pair[0]) or _page_key(pair[0])].append(pair)
+        grouped = list(page_groups.values())
         random.shuffle(grouped)
-        split_idx = int(len(grouped) * train_ratio)
+        # A folder holding a single page would otherwise go entirely to validation.
+        split_idx = max(1, int(len(grouped) * train_ratio))
         for group in grouped[:split_idx]:
             train_pairs.extend(group)
         for group in grouped[split_idx:]:
@@ -793,7 +827,8 @@ def split_and_save_pairs(
     seed: int = 42,
     mode: Literal['keep', 'extend', 'reset'] = 'reset',
     num_workers: int | None = None,
-    valid_sources: list[str] | None = None
+    valid_sources: list[str] | None = None,
+    page_keys: dict[Path, str] | None = None
 ):
     output_path = Path(output_dir)
     train_dir = output_path / 'train'
@@ -817,18 +852,18 @@ def split_and_save_pairs(
             manifest_path.unlink()
         train_mapping = {}
         valid_mapping = {}
-        train_pairs, valid_pairs = stratified_split(pairs, train_ratio, seed, valid_sources)
+        train_pairs, valid_pairs = stratified_split(pairs, train_ratio, seed, valid_sources, page_keys)
 
     elif mode == 'keep':
         print("Keeping existing validation set...")
         new_pairs = [p for p in pairs if str(p[0]) not in all_existing_paths]
-        train_pairs, _ = stratified_split(new_pairs, 1.0, seed, valid_sources)
+        train_pairs, _ = stratified_split(new_pairs, 1.0, seed, valid_sources, page_keys)
         valid_pairs = []
 
     elif mode == 'extend':
         print("Extending existing dataset...")
         new_pairs = [p for p in pairs if str(p[0]) not in all_existing_paths]
-        train_pairs, valid_pairs = stratified_split(new_pairs, train_ratio, seed, valid_sources)
+        train_pairs, valid_pairs = stratified_split(new_pairs, train_ratio, seed, valid_sources, page_keys)
     else:
         raise ValueError(f"Invalid mode: {mode}")
 
@@ -910,6 +945,7 @@ def process_ocr_dataset(
 
     print(f"Searching for image-text pairs in {len(sources)} directories...")
     pairs = []
+    page_keys = {}
     page_lines_root = Path('data_sources/_page_lines')
     for root_path, limit in sources:
         if is_page_xml_dataset(root_path):
@@ -917,6 +953,7 @@ def process_ocr_dataset(
             page_lines_root.mkdir(parents=True, exist_ok=True)
             process_page_xml_dataset(root_path, page_lines_root)
             src_pairs = find_image_text_pairs(page_lines_root / root_path.name)
+            page_keys.update(_page_xml_keys(root_path, page_lines_root / root_path.name, src_pairs))
         else:
             src_pairs = find_image_text_pairs(root_path)
 
@@ -940,7 +977,8 @@ def process_ocr_dataset(
         print("\nSkipping duplicate-image hashing")
 
     if filtered_pairs:
-        split_and_save_pairs(filtered_pairs, output_dir, train_ratio, seed, mode, valid_sources=valid_sources)
+        split_and_save_pairs(filtered_pairs, output_dir, train_ratio, seed, mode,
+                             valid_sources=valid_sources, page_keys=page_keys)
     else:
         print("No pairs to process!")
 

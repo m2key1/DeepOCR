@@ -6,26 +6,25 @@ from typing import Sequence
 import torch
 
 # Equivalences NFD does not cover: code points that render as the same pen stroke and so cannot
-# be told apart from pixels. CATMuS writes every apostrophe as U+0027 and every dash as U+002D
-# while other sources keep the typography, so the same mark had different targets per corpus.
+# be told apart from pixels. Sources differ in whether they keep the typographic form, so folding
+# gives the same mark one target.
 #
-# Not merged: „ (28506) vs “ (11920) are a low and a raised mark, and « » are distinct shapes.
-# Greek is real Greek text (θρίαμβοσ, Δηιπυλη), so its Latin homoglyphs stay. The Cyrillic is
-# folded only because the one line it appears in ("Stubnerkogeл-Bergbahnges.") is a mistyped 'el'.
+# Not merged: „ vs “ are a low and a raised mark, and « » are distinct shapes. Greek is real Greek
+# text, so its Latin homoglyphs stay. Cyrillic occurs only as typos inside Latin words.
 CANONICAL_MAP = {
-    '´': "'",       # ACUTE ACCENT                   (5)
-    '`': "'",       # GRAVE ACCENT                   (5)
-    ' ': ' ',       # NO-BREAK SPACE               (429)
+    '´': "'",       # ACUTE ACCENT
+    '`': "'",       # GRAVE ACCENT
+    ' ': ' ',       # NO-BREAK SPACE
     'а': 'a', 'е': 'e', 'к': 'k',   # Cyrillic homoglyphs
     'л': 'l', 'м': 'm', 'р': 'p',
 
-    'ꝛ': 'r',       # LATIN SMALL LETTER R ROTUNDA  (133)
+    'ꝛ': 'r',       # LATIN SMALL LETTER R ROTUNDA
 
     # Fraktur and gazette symbols from the German corpora (reichsanzeiger, mkn_kurrent,
-    # UB-Mannheim). Folding them took OOV over 328,496 German lines from 61,516 occurrences to 81.
+    # UB-Mannheim), folded so they need no vocabulary entry.
     #
     # Typographic variants, no meaningful loss:
-    '̅': '̄',    # COMBINING OVERLINE -> COMBINING MACRON, same nasal-abbreviation stroke (4759)
+    '̅': '̄',    # COMBINING OVERLINE -> COMBINING MACRON, same nasal-abbreviation stroke
     'ʼ': "'", 'ˀ': "'",  # MODIFIER LETTER APOSTROPHE / GLOTTAL STOP -> apostrophe
     'ℛ': 'R', 'ℓ': 'l', 'ϑ': 'θ',  # SCRIPT R / SCRIPT l / THETA SYMBOL -> plain forms
     'ʃ': 's', 'ʝ': 'j',    # ESH / J-CROSSED-TAIL -> nearest plain letter
@@ -37,9 +36,9 @@ CANONICAL_MAP = {
     '✳': '*',              # U+2733 EIGHT SPOKED ASTERISK -> plain asterisk (decorative variant)
     #
     # Meaningful symbols with no in-vocab token, folded lossily to avoid a vocab and KenLM change:
-    'ℳ': 'M',              # U+2133 German MARK currency sign -> M (7830) [LOSSY: currency]
+    'ℳ': 'M',              # U+2133 German MARK currency sign -> M [LOSSY: currency]
     'ℒ': 'L', 'ℬ': 'B', 'ℭ': 'C',  # other script-capital letters -> plain
-    'ʒ': 'z', 'Ʒ': 'Z',    # EZH -> z (5911) [LOSSY: a distinct letter in Middle High German]
+    'ʒ': 'z', 'Ʒ': 'Z',    # EZH -> z [LOSSY: a distinct letter in Middle High German]
     '℔': 'lb',             # L-B BAR (pound weight) -> lb
     #
     # Encoding errors and non-textual marks are deleted, the line is kept:
@@ -48,10 +47,8 @@ CANONICAL_MAP = {
     '⟦': '', '⟧': '', '₰': '', '₤': '', 'ӕ': '',  # editorial brackets, penny/lira signs, cyrillic-error
 }
 
-# Not folded, because CONVENTION_NAMES in train.py conditions on them instead: gt4histocr keeps
-# long s on 68.8% of its lines and the oblique hyphen on 61.1%, the other 1.4M lines write the
-# plain forms. Folding cost 43% of Kurrent errors and 50% of the BnL Fraktur ones. Anything added
-# back here must also leave the CONVENTION_NAMES flag list.
+# Not folded, because corpora disagree on them and CONVENTION_NAMES in train.py conditions on them
+# instead. Anything added back here must also leave the CONVENTION_NAMES flag list.
 #   ſ  U+017F LONG S            ⸗  U+2E17 DOUBLE OBLIQUE HYPHEN
 #   ’ ‘ U+2019 U+2018           ”  U+201D           –  U+2013 EN DASH
 #

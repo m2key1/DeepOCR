@@ -26,17 +26,15 @@ try:
 except RuntimeError:
     pass
 
-# A multi-GPU run died mid-epoch in loss.backward() with a cuDNN fused-attention failure
-# (mha_graph.execute(...).is_good() == false); keeping SDPA off cuDNN avoids that kernel.
+# cuDNN fused attention fails in backward under DDP
 torch.backends.cuda.enable_cudnn_sdp(False)
 
-# 'cnn' (depthwise-separable) measured 1.6x slower than 'cnn_grouped' at similar size because the
-# depthwise pair is memory-bound on a GPU. 'dinov3' and 'trocr' are why transformers is a dependency.
+# 'cnn' is slower than 'cnn_grouped' at similar size: its depthwise pair is memory-bound on a GPU.
+# 'dinov3' and 'trocr' are why transformers is a dependency.
 BACKBONE = 'cnn_grouped'
 CNN_WIDTH_STRIDE = 8
 FREEZE_BACKBONE = False
-# 256 / 32 keeps eight feature rows, so the extra detail is spent in the backbone. kurrent_01, the
-# worst dataset at 12.7% CER, arrives at a 245 px median and was losing detail to a 128 px resize.
+# 256 / 32 keeps eight feature rows, so the extra detail is spent in the backbone.
 PATCH_SIZE = 32
 TARGET_HEIGHT = 256
 # The dataset caps the aspect-preserved width here and squashes anything wider, so the cap has
@@ -74,9 +72,9 @@ ROUTER_BIAS_RATE = 1e-3
 NUM_CONV_EXPERTS = 2
 CONV_EXPERT_KERNEL = 15
 
-# gt4histocr keeps long s on 68.8% of its lines and the oblique hyphen on 61.1% while other
-# corpora fold both, so the convention is a per-line input. Written by scripts/audit_conventions.py;
-# rerun it when sources change, since a corpus with no row trains as normalized.
+# Corpora disagree on long s and the oblique hyphen, so the convention is a per-line input. Written
+# by scripts/audit_conventions.py; rerun it when sources change, since a corpus with no row trains
+# as normalized.
 CONVENTIONS_PATH = Path('data/conventions.json')
 if CONVENTIONS_PATH.exists():
     _conventions = json.loads(CONVENTIONS_PATH.read_text(encoding='utf-8'))
@@ -104,10 +102,9 @@ SAVE_BEST_OF_HEADS = False
 SELECT_ON_DECODER = False
 
 BASE_BATCH_SIZE = 60
-# Per GPU. On an H200 at the widest bucket (width 6144): 80 peaks at 127.5 of 140 GiB, 88 OOMs.
+# Per GPU, sized for the widest bucket on a 141 GB card.
 BATCH_SIZE = int(os.environ.get('OCR_BATCH', 80))
-# A 100-epoch run was cut off by the job time limit around epoch 21 and the LR never annealed;
-# pick a count the wall clock can finish.
+# The cosine schedule only anneals if the run finishes, so pick a count the job time limit allows.
 EPOCHS = 60
 BACKBONE_BASE_LR = 1e-4
 CTC_ENTROPY_WEIGHT = 0.1
@@ -128,25 +125,23 @@ VAL_FREQUENCY = 1
 
 BUCKET_SIZE_MULTIPLIER = 50
 SAMPLER_SEED = 0
-# Byte-level 6-gram over the 2,348,261 unfolded training lines. An LM built before the conventions
-# were unfolded never saw a long s and steers beam search away from it. A dict that is not
-# index-parallel to the tokenizer is refused and beam search runs without the LM.
+# Build on unfolded text: an LM that never saw a long s steers beam search away from it. A dict
+# that is not index-parallel to the tokenizer is refused and beam search runs without the LM.
 KENLM_PATH = Path('data/lm/union_bytes_v2.bin')
 LM_DICT_PATH = Path('data/lm/union_bytes_v2.dict')
-LM_WEIGHT = 1.5 # swept on the byte base model over 1200 valid samples: 0.5->0.02991,
-# 1.0->0.02929, 1.5->0.02881, 2.0->0.02942, 2.5->0.03097. Re-sweep when the LM or vocab changes.
+LM_WEIGHT = 1.5 # swept optimum for the byte LM; re-sweep when the LM or vocab changes
 
 CACHE_TO_RAM = False
 EXCLUDE_DATA = []
 IMAGENET_NORMALIZED_WHITE = (1.0 - 0.456) / 0.224
 INCLUDE_DATA = []
 # Per rank. Each spawn worker holds a copy of the dataset, so host RAM scales with GPUs x workers x
-# prefetch: 7 GPUs x 16 x prefetch 4 OOM'd a 512G box (562G RSS); 8 keeps 7 GPUs fed.
+# prefetch.
 NUM_WORKERS = int(os.environ.get('OCR_NUM_WORKERS', 8))
-# The full 259k valid split takes hours to decode every epoch; a seeded 25k subset gives a stable CER.
+# Decoding the full valid split every epoch takes hours; a seeded subset gives a stable CER.
 VALID_LIMIT = int(os.environ.get('OCR_VALID_LIMIT', 25000))
-# Per-step curves are unreadable at ~2,300 steps an epoch and dominate the event file, so the
-# batch-level scalars are sampled. Epoch-level metrics are always written.
+# Per-step curves dominate the event file, so batch-level scalars are sampled. Epoch-level metrics
+# are always written.
 SCALAR_LOG_INTERVAL = int(os.environ.get('OCR_SCALAR_LOG_INTERVAL', 50))
 PIN_MEMORY = True
 
@@ -164,7 +159,7 @@ DATASET_SOURCES = [
 ]
 
 # Dataset labels filtered from the split at load time, for corpora whose ground truth cannot
-# match line transcription (word-level or structure-token GT pushed per-dataset CER above 1.0).
+# match line transcription (word-level or structure-token GT).
 DROP_DATASETS = []
 
 DEBUG = False
@@ -279,9 +274,8 @@ def _respelled(node):
 
 
 # Augmentations run after the resize to TARGET_HEIGHT, so anything measured in pixels has to
-# track it or it weakens as the geometry grows. Measured median stroke width is 3.4 px at 128
-# and 5.6 px at 256, so the scale factor keeps every pixel-absolute op at the same strength
-# relative to the ink. Fractional transforms (noise, dropout, shadow, spatter, affine) need none.
+# track it to keep the same strength relative to the stroke width. The pixel values below are for
+# 128 px. Fractional transforms (noise, dropout, shadow, spatter, affine) need no scaling.
 _AUG_PIXEL_SCALE = TARGET_HEIGHT / 128
 
 
@@ -320,22 +314,20 @@ def get_transforms() -> tuple[A.Compose, A.Compose]:
             p=0.3,
             fill=255
         ),
-        # Models slant and baseline drift. At 128 px alpha 1 was a no-op (CER 3.45 vs 3.40 clean),
-        # 40 gave 3.9%, 200 destroyed the line (11.63%). approximate: 92.8 -> 16.7 ms per line.
+        # Models slant and baseline drift; a much larger alpha destroys the line.
         A.ElasticTransform(alpha=40 * _AUG_PIXEL_SCALE, sigma=50 * _AUG_PIXEL_SCALE,
                            approximate=True, p=0.2),
-        # The default roi puts every shadow on the bottom half; full-line cost 3.55% vs 3.52% CER.
+        # The default roi puts every shadow on the bottom half.
         A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.3),
         A.GaussNoise(p=0.3),
         A.GaussianBlur(sigma_limit=(0.5 * _AUG_PIXEL_SCALE, 3.0 * _AUG_PIXEL_SCALE), blur_limit=0, p=0.3),
-        # Dilation erases strokes past the stroke width: at 128 px scale 7 doubled CER to 7.59%.
-        # Erosion only fattens the pen and stays harmless at 9 (4.05%).
+        # Dilation erases strokes past the stroke width; erosion only fattens the pen.
         A.OneOf([
             A.Morphological(operation='erosion', scale=_scaled(2, 6), p=1.0),
             A.Morphological(operation='dilation', scale=_scaled(2, 4), p=1.0)
         ],
                 p=0.3),
-        # Every line is greyscale (R=G=B on 1100 sampled images), so channel ops measured 0.00 CER.
+        # Lines are greyscale, so colour-channel ops would do nothing.
         _brightness_contrast(p=0.3),
         A.PixelDropout(dropout_prob=0.05, per_channel=True, p=0.3),
         A.CoarseDropout(num_holes_range=(1, 5), hole_height_range=(0.05, 0.15), hole_width_range=(0.02, 0.08), fill=0, p=0.3),
@@ -576,8 +568,8 @@ def main():
 
     valid_sampler = DistributedSampler(valid_dataset, shuffle=False) if is_distributed else None
 
-    # Respawning workers took 41 of a 48 s validation pass on 2 x H200; they are alive during
-    # validation anyway, so persisting them adds nothing to peak host memory.
+    # Respawning workers dominates a validation pass; they are alive during validation anyway, so
+    # persisting them adds nothing to peak host memory.
     valid_dataloader = DataLoader(
         valid_dataset,
         batch_size=BATCH_SIZE,
@@ -630,8 +622,7 @@ def main():
     ])
     criterion = CTCLossWithSmoothing(blank_id=tokenizer.blank_token_id, smoothing_weight=CTC_ENTROPY_WEIGHT, zero_infinity=True)
 
-    # Stacked expert weights mean no parameter is ever unused, so static_graph is safe:
-    # 805.6 -> 790.2 ms a step on 2 x RTX PRO 6000.
+    # Stacked expert weights mean no parameter is ever unused, so static_graph is safe.
     ddp_model = DDP(
         model,
         device_ids=[local_rank],

@@ -42,8 +42,7 @@ KENLM_MAX_ORDER = 6
 
 
 def resolve_tokens(args) -> list[str]:
-    """A checkpoint wins, since a model trained before the byte vocabulary still carries a
-    character inventory."""
+    """A checkpoint wins, since a character-vocabulary checkpoint carries its own inventory."""
     if args.checkpoint:
         ck = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
         tokens = ck.get('tokenizer_tokens')
@@ -96,8 +95,8 @@ def collect_corpus(input_dirs: list[Path], include: list[str], exclude: list[str
                    manifest: Path | None, manifest_split: str) -> list[Path]:
     """With a manifest, --include/--exclude match against the original data_sources/ path,
     since data/train is flat."""
-    # The split keeps each sample's original suffix (948,873 .gt.txt, 37,097 .txt); globbing
-    # .gt.txt alone dropped 3.8% of the corpus. One text file per sample, so *.txt never double-counts.
+    # The split keeps each sample's original suffix, .gt.txt or .txt. One text file per sample, so
+    # *.txt never double-counts.
     files = []
     for d in input_dirs:
         if not d.exists():

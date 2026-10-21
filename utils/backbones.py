@@ -167,10 +167,9 @@ class GroupedConv(nn.Module):
     """Grouped 3x3 conv with BatchNorm, Hardswish and optional squeeze-excite. Stands in for the
     depthwise + pointwise pair of DepthSepConv.
 
-    The depthwise pair is memory-bound on a GPU: at 128x2048 with 96 channels one DepthSepConv
-    (10,464 params) took 6.13 ms against 6.41 ms for a plain 3x3 (83,136 params). Grouping at
-    channels // 32, SVTRv2's choice, keeps enough arithmetic intensity to use the tensor cores
-    while staying well under a dense conv's parameter count."""
+    The depthwise pair is memory-bound on a GPU, nearly as slow as a dense 3x3 at an eighth of its
+    parameters. Grouping at channels // 32, SVTRv2's choice, keeps enough arithmetic intensity to
+    use the tensor cores while staying well under a dense conv's parameter count."""
 
     def __init__(self, in_channels: int, out_channels: int, stride: Tuple[int, int], use_se: bool,
                  group_width: int = 32):
@@ -199,9 +198,8 @@ class GroupedCNNBackbone(nn.Module):
 
     The stem halves height but not width. Width sets the CTC frame rate and cannot be recovered
     downstream; height is collapsed to patch_size rows regardless, so taking one of those halvings
-    at the stem is close to free. The stem kernel is 5 because going from 3 to 5 cost 0.05 ms in
-    the same benchmark. Remaining downsampling is spent on the earliest stages, where each halving
-    removes the most work from everything after it."""
+    at the stem is close to free, and so is a stem kernel of 5 over 3. Remaining downsampling is
+    spent on the earliest stages, where each halving removes the most work from everything after it."""
 
     def __init__(
         self,

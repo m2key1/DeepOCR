@@ -10,13 +10,12 @@ from utils.dataset import derive_dataset_label
 
 SOURCES_ROOT = Path('data_sources')
 MIN_LINES = 200
-# Measured ratios separate cleanly: the diplomatic corpora sit at 55-100% and the normalized ones
-# at 0-5%, with nothing in between. 10% puts the cut in the gap rather than next to a corpus.
+# Diplomatic and normalized corpora fall far either side of this, so the cut sits in the gap.
 MARKED_RATIO = 0.10
 SAMPLE_PER_SOURCE = 40000
 OUT_PATH = Path('data/conventions.json')
 
-# Each flag pairs the diplomatic form with the normalized one it used to be folded to. A corpus
+# Each flag pairs the diplomatic form with its normalized counterpart. A corpus
 # gets the flag when it writes the diplomatic form on more than MARKED_RATIO of its occurrences.
 FLAGS = {
     'long_s': ('ſ', 's'),
