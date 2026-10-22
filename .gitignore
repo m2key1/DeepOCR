@@ -31,6 +31,7 @@ runs/
 
 benchmarks/
 docs/
+papers/
 
 # site-specific SLURM scripts
 *.local.slurm
