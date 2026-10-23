@@ -1,18 +1,18 @@
 import collections
 import json
+import os
 import sys
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from train import DATASET_SOURCES
+from train import DATASET_SOURCES, DROP_DATASETS, SPLIT_MANIFEST, TRAIN_DATA_DIR
 from utils.dataset import derive_dataset_label
 
-SOURCES_ROOT = Path('data_sources')
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg')
+TEXT_EXTENSIONS = ('.txt', '.gt.txt', '.corrected.txt')
 MIN_LINES = 200
 # Diplomatic and normalized corpora fall far either side of this, so the cut sits in the gap.
 MARKED_RATIO = 0.10
-SAMPLE_PER_SOURCE = 40000
 OUT_PATH = Path('data/conventions.json')
 
 # Each flag pairs the diplomatic form with its normalized counterpart. A corpus
@@ -24,44 +24,37 @@ FLAGS = {
 }
 
 
-def iter_texts(source: Path):
-    """Ground truth as the dataset sees it: loose transcriptions plus PAGE XML text lines, which
-    is where the handwriting corpora keep theirs."""
-    seen = 0
-    for path in source.rglob('*'):
-        if seen >= SAMPLE_PER_SOURCE:
-            return
-        if path.suffix.lower() == '.txt':
-            try:
-                yield path, path.read_text(encoding='utf-8', errors='ignore')
-                seen += 1
-            except OSError:
-                continue
-        elif path.suffix.lower() == '.xml':
-            try:
-                root = ET.fromstring(path.read_text(encoding='utf-8', errors='ignore'))
-            except (OSError, ET.ParseError):
-                continue
-            for node in root.iter():
-                if node.tag.rsplit('}', 1)[-1] == 'Unicode' and node.text:
-                    yield path, node.text
-                    seen += 1
+def iter_labelled_texts():
+    """Reads the prepared training split rather than data_sources, so every corpus is measured on
+    the text it trains on, whichever format (loose text, PAGE or ALTO XML) it shipped in."""
+    stem_to_source = {}
+    if SPLIT_MANIFEST.exists():
+        manifest = json.loads(SPLIT_MANIFEST.read_text(encoding='utf-8'))
+        stem_to_source = manifest.get('train', {})
+    dropped = set(DROP_DATASETS)
+    names = {entry.name for entry in os.scandir(TRAIN_DATA_DIR)}
+    for name in names:
+        stem, extension = os.path.splitext(name)
+        if extension.lower() not in IMAGE_EXTENSIONS:
+            continue
+        text_name = next((stem + ext for ext in TEXT_EXTENSIONS if stem + ext in names), None)
+        if text_name is None:
+            continue
+        source = stem_to_source.get(stem, str(TRAIN_DATA_DIR / name))
+        if dropped & set(source.replace('\\', '/').split('/')):
+            continue
+        label = derive_dataset_label(source, DATASET_SOURCES)
+        yield label, (TRAIN_DATA_DIR / text_name).read_text(encoding='utf-8', errors='ignore')
 
 
 def main():
     counts = collections.defaultdict(collections.Counter)
-    for entry in DATASET_SOURCES:
-        source = Path(entry)
-        if not source.exists():
-            print(f"  skipped, not on this machine: {entry}")
-            continue
-        for path, text in iter_texts(source):
-            label = derive_dataset_label(str(path), DATASET_SOURCES)
-            bucket = counts[label]
-            bucket['lines'] += 1
-            for flag, (marked, plain) in FLAGS.items():
-                bucket[flag] += sum(text.count(c) for c in marked)
-                bucket[f'{flag}_plain'] += sum(text.count(c) for c in plain)
+    for label, text in iter_labelled_texts():
+        bucket = counts[label]
+        bucket['lines'] += 1
+        for flag, (marked, plain) in FLAGS.items():
+            bucket[flag] += sum(text.count(c) for c in marked)
+            bucket[f'{flag}_plain'] += sum(text.count(c) for c in plain)
 
     table = {}
     print(f"\n{'dataset label':<42} {'lines':>8}  " + '  '.join(f'{f:>24}' for f in FLAGS))

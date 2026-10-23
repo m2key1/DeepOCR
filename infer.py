@@ -32,9 +32,9 @@ RESCORE_ALPHA = 0.3
 RESCORE_BETA = 0.0
 # One byte-level KenLM over all training domains, the same one train.py fuses. It helps every prose
 # domain and is neutral on structured data. Build it with build_kenlm.py.
-KENLM_PATH = Path('data/lm/union_bytes_v2.bin')
-LM_DICT_PATH = Path('data/lm/union_bytes_v2.dict') # index-parallel to the tokenizer; required alongside KENLM_PATH
-LM_WEIGHT = 1.5 # swept for the byte LM on the base model; drop to ~0.5 for mostly-numeric/structured text
+KENLM_PATH = Path('data/lm/union_bytes_v3.bin')
+LM_DICT_PATH = Path('data/lm/union_bytes_v3.dict') # index-parallel to the tokenizer; required alongside KENLM_PATH
+LM_WEIGHT = 1.0 # swept for the byte LM on the base model; drop to ~0.5 for mostly-numeric/structured text
 NUM_EXAMPLES_TO_PRINT = 20
 # Which transcription convention to ask for, when the checkpoint was trained with conditioning
 # (model.convention_names lists what it understands). None means the normalized convention.

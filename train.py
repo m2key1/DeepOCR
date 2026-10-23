@@ -127,9 +127,9 @@ BUCKET_SIZE_MULTIPLIER = 50
 SAMPLER_SEED = 0
 # Build on unfolded text: an LM that never saw a long s steers beam search away from it. A dict
 # that is not index-parallel to the tokenizer is refused and beam search runs without the LM.
-KENLM_PATH = Path('data/lm/union_bytes_v2.bin')
-LM_DICT_PATH = Path('data/lm/union_bytes_v2.dict')
-LM_WEIGHT = 1.5 # swept optimum for the byte LM; re-sweep when the LM or vocab changes
+KENLM_PATH = Path('data/lm/union_bytes_v3.bin')
+LM_DICT_PATH = Path('data/lm/union_bytes_v3.dict')
+LM_WEIGHT = 1.0 # swept optimum for this LM; re-sweep when the LM or vocab changes
 
 CACHE_TO_RAM = False
 EXCLUDE_DATA = []
