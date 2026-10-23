@@ -222,8 +222,8 @@ class DeepTokenizer:
         return ids
 
     def _tokens_to_text(self, tokens: list[str]) -> str:
-        """Byte runs decode with errors='replace', so an invalid sequence the model emits surfaces
-        as U+FFFD and counts as a CER error instead of crashing."""
+        """Greedy CTC emits a partial multi-byte character when unsure of it; those bytes are
+        dropped rather than rendered as U+FFFD, which would add an error where nothing was read."""
         parts = []
         run = bytearray()
         for tok in tokens:
@@ -231,11 +231,11 @@ class DeepTokenizer:
                 run.append(ord(tok))
             else:
                 if run:
-                    parts.append(run.decode('utf-8', errors='replace'))
+                    parts.append(run.decode('utf-8', errors='ignore'))
                     run = bytearray()
                 parts.append(tok)
         if run:
-            parts.append(run.decode('utf-8', errors='replace'))
+            parts.append(run.decode('utf-8', errors='ignore'))
         return ''.join(parts)
 
     def decode(self, ids: torch.Tensor | list[int], skip_special_tokens=True) -> str:
