@@ -11,24 +11,55 @@ Output of a development checkpoint on four lines it was not trained on: a Kurren
 ## Quickstart
 
 ```bash
-pip install -r requirements-inference.txt
+pip install -r requirements-inference.txt huggingface_hub
+hf download M2key1/deepocr-v3 --local-dir weights
 ```
 
-Pretrained weights are not published yet (see "Pretrained model" below). With a checkpoint from `train.py`:
-
 ```python
+from pathlib import Path
 import torch
 from PIL import Image
 import infer
 from infer import load_model, transcribe_beam
 
+infer.KENLM_PATH = Path('weights/union_bytes_v3.bin')
+infer.LM_DICT_PATH = Path('weights/union_bytes_v3.dict')
+infer.LM_WEIGHT = 1.0
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model, tokenizer = load_model('runs/latest_run/best_model.pt', device)
+model, tokenizer = load_model('weights/deepocr-v3.pt', device)
 print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])
 
 infer.CONVENTION = {'long_s': 1.0, 'oblique_hyphen': 1.0}   # diplomatic: ſ and ⸗ instead of s and -
 print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])
 ```
+
+## Fine-tuning on your own lines
+
+1. Put line images with their transcriptions in two folders:
+
+   ```
+   mydata/
+     train/<stem>.png  <stem>.txt
+     valid/<stem>.png  <stem>.txt
+   ```
+
+2. Download the model (see Quickstart) and train from it:
+
+   ```bash
+   TRAIN_SNAPSHOT=mydata TRAIN_BASE_CHECKPOINT=weights/deepocr-v3.pt TRAIN_EPOCHS=20 python train.py
+   ```
+
+   The run writes `runs/ocr_<timestamp>/best_model.pt`; `runs/latest_run` points at it.
+   Multi-GPU: `torchrun --standalone --nproc_per_node=gpu train.py` with the same variables.
+
+3. Decode with v3's language model (the vocabulary is the same), or build one from your text:
+
+   ```bash
+   python build_kenlm.py --input mydata/train --out data/lm/mine --checkpoint runs/latest_run/best_model.pt
+   ```
+
+4. Read with it as in the Quickstart, loading `runs/latest_run/best_model.pt`.
 
 ## How it reads a line
 
@@ -124,48 +155,6 @@ Datasets, checkpoints and language models are not part of this repository.
 </details>
 
 <details>
-<summary><b>Training data of the base model</b></summary>
-
-Every source listed here allows commercial use. Line counts are per source; totals follow with the trained model. The public part:
-
-| Corpus | Material | Lines | Licence |
-|---|---|--:|---|
-| 13 Zenodo records (below) | newspapers, notarial and court records, letters, charters, incunabula | 514,620 | per record |
-| 63 HTR-United repositories, from the training data of the party recognizer ([Zenodo 14616980](https://zenodo.org/records/14616980)) | French, Latin, Spanish, Italian and Czech manuscripts and prints | 515,815 | per repository |
-| GT4HistOCR ([Zenodo 1344132](https://zenodo.org/records/1344132)): dta19, EarlyModernLatin, Kallimachos, RefCorpus-ENHG-Incunabula, RIDGES-Fraktur | German Fraktur and early print | 313,065 | CC-BY-4.0 |
-| CATMuS Medieval | medieval Latin and vernacular manuscripts | 194,318 | CC-BY-4.0 |
-| BnL Antiqua newspapers before 1878 (Hugging Face `biglam/bnl_ground_truth_newspapers_before_1878`) | Luxembourg newspapers, 1840s-1878, Antiqua | 19,282 | CC0 |
-| READ 2016 / ICFHR 2016 ([Zenodo 1297399](https://zenodo.org/records/1297399)) | Bozen council minutes, German handwriting | 10,527 | CC-BY-4.0 |
-| ICDAR 2026 Multilingual Medieval Handwriting Recognition, training set ([Zenodo 19884972](https://zenodo.org/records/19884972)) | medieval manuscripts, mixed Latin script | 124,939 | CC-BY-4.0 |
-| reichsanzeiger-gt | Imperial and Prussian gazette, Fraktur | 119,431 | CC0 |
-| CATMuS Modern | modern-era manuscripts, Latin script | 117,507 | CC-BY-4.0 |
-| NotarialDeeds_HTR (Hugging Face `rjadr/NotarialDeeds_HTR`) | 19th-century Dutch notarial handwriting | 102,372 | unstated; derived from the Noord-Hollands Archief ground truth, CC-BY-4.0 |
-| mkn-kurrent-gt | Kurrent handwriting, 1765-1807 | 19,568 | CC-BY-SA |
-| charlottenburger-amtsschrifttum | Charlottenburg administrative records, Fraktur | 3,580 | CC0 |
-
-Each repository and Zenodo record is capped at 50,000 lines.
-
-| Zenodo record | Lines | Licence |
-|---|--:|---|
-| [4599624](https://zenodo.org/records/4599624) NewsEye / READ, Swedish newspapers | 50,000 | CC-BY-4.0 |
-| [14679534](https://zenodo.org/records/14679534) Kat57, Lund University Library catalogue | 50,000 | CC-BY-4.0 |
-| [11209325](https://zenodo.org/records/11209325) VOC, WIC and notarial deeds | 50,000 | CC-BY-4.0 |
-| [4599472](https://zenodo.org/records/4599472) NewsEye / READ, Finnish newspapers | 50,000 | CC-BY-4.0 |
-| [3387369](https://zenodo.org/records/3387369) NewsEye / READ, Austrian newspapers | 49,999 | CC-BY-4.0 |
-| [5654841](https://zenodo.org/records/5654841) NewsEye / READ, French newspapers | 49,997 | CC-BY-4.0 |
-| [11046062](https://zenodo.org/records/11046062) Incunabula Reichenau | 47,771 | CC-BY-SA-4.0 |
-| [5179361](https://zenodo.org/records/5179361) Königsfelden Abbey charters, 1308-1662 | 46,962 | CC-BY-4.0 |
-| [13881575](https://zenodo.org/records/13881575) Nuremberg Letterbooks, early 15th century | 38,598 | CC-BY-4.0 |
-| [4243023](https://zenodo.org/records/4243023) University of Denver, JCRS | 35,958 | CC-BY-4.0 |
-| [3945088](https://zenodo.org/records/3945088) Finnish court records, 19th century | 32,176 | CC-BY-4.0 |
-| [17978574](https://zenodo.org/records/17978574) Augustinian canonesses in Inzigkofen | 8,297 | CC-BY-4.0 |
-| [10255840](https://zenodo.org/records/10255840) NorHand v3, Norwegian | 4,862 | CC-BY-4.0 |
-
-The remaining lines are not public yet and will be released later: the author's own line crops and transcriptions of printed yearbooks and name registers set in Antiqua, own transcriptions of archival handwriting and early prints, and synthetic lines the author rendered, among them Wikipedia interface text set in Google Fonts.
-
-</details>
-
-<details>
 <summary><b>Training</b></summary>
 
 All hyperparameters are module-level constants at the top of `train.py`. Runtime overrides that do not require editing the file:
@@ -230,11 +219,7 @@ The same module is the Python API shown in the quickstart. Besides `transcribe_b
 <details>
 <summary><b>Pretrained model</b></summary>
 
-A base model will be published under the same Apache-2.0 license; the download link goes here once it is trained and uploaded.
-
-It is the architecture `train.py` builds by default, with transcription-convention conditioning and the byte vocabulary, so it can emit any Unicode character. It is trained from scratch on the training split of the corpora listed under "Training data of the base model".
-
-To fine-tune it once it is out, set `PRETRAIN_WEIGHTS` in `train.py` to the downloaded `best_model.pt` (or export `TRAIN_BASE_CHECKPOINT`), prepare `data/train` and `data/valid` from your own lines, and run `train.py` as above.
+[DeepOCR v3](https://huggingface.co/M2key1/deepocr-v3) (Apache-2.0): the default architecture, trained from scratch on public datasets of historical print and handwriting, with its own KenLM. 3.0% CER on its validation split with beam search and the LM. To fine-tune it, see "Fine-tuning on your own lines".
 
 </details>
 

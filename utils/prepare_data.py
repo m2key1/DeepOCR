@@ -957,7 +957,7 @@ if __name__ == "__main__":
         for project_id in LABEL_STUDIO_PROJECT_IDS
     ]
 
-    # The full corpus list is in the Training data section of README.md.
+    # A short example of corpora under data_sources/.
     process_ocr_dataset(
         root_dirs=[
             {"path": "data_sources/catmus_medieval", "limit": None},

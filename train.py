@@ -153,7 +153,7 @@ PIN_MEMORY = True
 TRAIN_DATA_DIR = Path('data/train')
 VALID_DATA_DIR = Path('data/valid')
 SPLIT_MANIFEST = Path('data/split_manifest.json')
-# A short example; the full corpus list is in the training data section of README.md.
+# A short example of corpora under data_sources/.
 DATASET_SOURCES = [
     "data_sources/catmus_medieval",
     "data_sources/catmus_modern/pairs",
