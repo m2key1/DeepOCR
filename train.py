@@ -74,8 +74,10 @@ CONV_EXPERT_KERNEL = 15
 
 # Corpora disagree on long s and the oblique hyphen, so the convention is a per-line input. Written
 # by scripts/audit_conventions.py; rerun it when sources change, since a corpus with no row trains
-# as normalized.
-CONVENTIONS_PATH = Path('data/conventions.json')
+# as normalized. TRAIN_CONVENTIONS names a file of the same shape for a fine-tune run from outside,
+# whose datasets say their own convention. A fine-tune also keeps every flag its base checkpoint
+# had (model._adopt_base_conventions), whether or not this file names it.
+CONVENTIONS_PATH = Path(os.environ.get('TRAIN_CONVENTIONS') or 'data/conventions.json')
 if CONVENTIONS_PATH.exists():
     _conventions = json.loads(CONVENTIONS_PATH.read_text(encoding='utf-8'))
     CONVENTION_NAMES = tuple(_conventions['names'])

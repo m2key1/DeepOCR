@@ -92,6 +92,20 @@ def _log_tensorboard_descriptions(writer: SummaryWriter):
     ))
 
 
+
+def remap_convention_columns(weight: torch.Tensor, old_names: Sequence[str],
+                             new_names: Sequence[str]) -> torch.Tensor:
+    """The convention projection of a base checkpoint laid out for this model's flags. Its columns
+    are flags, matched by name rather than position: a flag the base knew keeps what it learned
+    wherever it now sits, and a new one starts at zero - the normalized convention, as a fresh
+    model's projection does."""
+    out = torch.zeros(weight.shape[0], len(new_names), dtype=weight.dtype)
+    column = {name: i for i, name in enumerate(old_names)}
+    for j, name in enumerate(new_names):
+        if name in column and column[name] < weight.shape[1]:
+            out[:, j] = weight[:, column[name]]
+    return out
+
 class PositionalEncoding(nn.Module):
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
@@ -1176,6 +1190,19 @@ class DeepOCR(nn.Module):
             texts.append(self.tokenizer.decode(row, skip_special_tokens=True))
         return texts
 
+    def _adopt_base_conventions(self, base_names: Sequence[str]) -> None:
+        """A fine-tune keeps every flag its base was conditioned on, after the ones it was given:
+        a flag the new data never sets still means what it meant, rather than being forgotten."""
+        merged = self.convention_names + [n for n in base_names if n not in self.convention_names]
+        if merged == self.convention_names:
+            return
+        added = len(merged) - len(self.convention_names)
+        self.convention_by_dataset = {label: list(row) + [0.0] * added
+                                      for label, row in self.convention_by_dataset.items()}
+        self.convention_names = merged
+        self.convention_proj = nn.Linear(len(merged), self.d_model, bias=False)
+        nn.init.zeros_(self.convention_proj.weight)
+
     def _load_pretrained_weights(self):
         try:
             if not self.weight_path or not self.weight_path.exists():
@@ -1184,6 +1211,11 @@ class DeepOCR(nn.Module):
 
             checkpoint = torch.load(self.weight_path, map_location='cpu', weights_only=False)
             pretrained_state = checkpoint['model_state_dict']
+            base_conventions = list(checkpoint.get('convention_names') or ())
+            self._adopt_base_conventions(base_conventions)
+            if 'convention_proj.weight' in pretrained_state:
+                pretrained_state['convention_proj.weight'] = remap_convention_columns(
+                    pretrained_state['convention_proj.weight'], base_conventions, self.convention_names)
             model_state = self.state_dict()
 
             # A different backbone architecture shares some tensor names and shapes by
