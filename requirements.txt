@@ -7,7 +7,7 @@ torchaudio
 
 # model and training
 transformers==5.2.0    # used only by the dinov3 and trocr backbones
-albumentationsx[contrib]
+albumentations==2.0.8
 opencv-python-headless
 pillow
 numpy

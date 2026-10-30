@@ -3,6 +3,7 @@ import math
 import multiprocessing as mp
 import os
 import shutil
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -232,8 +233,8 @@ if os.environ.get('TRAIN_SNAPSHOT'):
         BATCH_SIZE = max(1, min(BATCH_SIZE, _pairs // _world))
 
 def _renamed(transform) -> bool:
-    """albumentationsX 2.3 renamed the limits to `*_range` and only warns about the old names,
-    so a limit spelled the other way silently falls back to the library default."""
+    """AlbumentationsX renamed the limits to `*_range`, and a stack saved against it may carry
+    those names; a limit spelled the other way would silently fall back to the default."""
     return 'brightness_range' in transform.InitSchema.model_fields
 
 
@@ -291,7 +292,11 @@ def get_transforms() -> tuple[A.Compose, A.Compose]:
     if os.environ.get('TRAIN_AUGMENT'):
         # Normalisation and the tensor conversion are appended so a saved stack cannot omit them.
         spec = json.loads(Path(os.environ['TRAIN_AUGMENT']).read_text(encoding='utf-8'))
-        steps = list(A.from_dict(_respelled(spec)))
+        # An argument the class does not take is only a warning to albumentations, and the run
+        # would train with the default in its place; in a saved stack it is a mistake.
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error', message=r'Argument\(s\).*not valid')
+            steps = list(A.from_dict(_respelled(spec)))
         return A.Compose([*steps, A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
                           ToTensorV2()]), val_transform
 
