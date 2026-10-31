@@ -16,6 +16,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from utils.conventions import ConventionTable
 from utils.dataset import OCRDataset, WidthBucketedBatchSampler, make_collate_fn, worker_init
 from utils.loss import CTCLossWithSmoothing
 from utils.model import DeepOCR
@@ -74,8 +75,8 @@ CONV_EXPERT_KERNEL = 15
 
 # Corpora disagree on long s and the oblique hyphen, so the convention is a per-line input. Written
 # by scripts/audit_conventions.py; rerun it when sources change, since a corpus with no row trains
-# as normalized.
-CONVENTIONS_PATH = Path('data/conventions.json')
+# as normalized. A training app passes its own through TRAIN_CONVENTIONS.
+CONVENTIONS_PATH = Path(os.environ.get('TRAIN_CONVENTIONS') or 'data/conventions.json')
 if CONVENTIONS_PATH.exists():
     _conventions = json.loads(CONVENTIONS_PATH.read_text(encoding='utf-8'))
     CONVENTION_NAMES = tuple(_conventions['names'])
@@ -83,6 +84,12 @@ if CONVENTIONS_PATH.exists():
 else:
     CONVENTION_NAMES = ()
     CONVENTION_BY_DATASET = {}
+# Hand-kept, unlike conventions.json: what each corpus's images show for a flag its GT does not
+# use, which decides whether that flag may be flipped on. Unlisted corpora only flip off.
+CONVENTION_IMAGE_STATES_PATH = Path('convention_image_states.json')
+CONVENTION_IMAGE_STATES = (json.loads(CONVENTION_IMAGE_STATES_PATH.read_text(encoding='utf-8'))
+                           if CONVENTION_IMAGE_STATES_PATH.exists() else {})
+CONVENTION_FLIP_PROB = 0.5
 WARMUP_ROUTER_EPOCHS = 0
 
 USE_DECODER = True
@@ -432,6 +439,12 @@ def main():
         lm_weight=LM_WEIGHT,
     )
 
+    train_conventions = valid_conventions = None
+    if CONVENTION_NAMES:
+        train_conventions = ConventionTable(CONVENTION_NAMES, CONVENTION_BY_DATASET, CONVENTION_IMAGE_STATES,
+                                            CONVENTION_FLIP_PROB)
+        valid_conventions = ConventionTable(CONVENTION_NAMES, CONVENTION_BY_DATASET)
+
     train_dataset = OCRDataset(
         data_dir=TRAIN_DATA_DIR,
         tokenizer=tokenizer,
@@ -449,7 +462,9 @@ def main():
         include_data=INCLUDE_DATA,
         manifest_path=SPLIT_MANIFEST,
         dataset_sources=DATASET_SOURCES,
-        exclude_datasets=DROP_DATASETS
+        exclude_datasets=DROP_DATASETS,
+        label_overrides=LABEL_OVERRIDES,
+        conventions=train_conventions
     )
 
     valid_dataset = OCRDataset(
@@ -470,11 +485,16 @@ def main():
         manifest_path=SPLIT_MANIFEST,
         dataset_sources=DATASET_SOURCES,
         exclude_datasets=DROP_DATASETS,
-        label_overrides=LABEL_OVERRIDES
+        label_overrides=LABEL_OVERRIDES,
+        conventions=valid_conventions
     )
 
     if is_master:
         print(f"Training samples: {len(train_dataset)}")
+        if train_conventions is not None:
+            for name, labels in train_conventions.unseen_labels(set(train_dataset.sample_labels)).items():
+                print(f"WARNING: {CONVENTION_IMAGE_STATES_PATH} lists {name} states for labels with no "
+                      f"training samples: {', '.join(labels)}")
         print(f"Validation samples: {len(valid_dataset)}")
 
     model = DeepOCR(

@@ -148,7 +148,7 @@ python utils/prepare_data.py
 
 It discovers image/text pairs (`.gt.txt`, `.txt`, and PAGE or ALTO XML pages, which are cropped to lines), keeps single-line ground truth, canonicalises the text, deduplicates by image hash and writes a stratified 90/10 split. Images are hardlinked. Set `PREP_DEDUPE=0` to skip the hash pass when the sources have not changed.
 
-Then run `python scripts/audit_conventions.py` to measure which corpora transcribe diplomatically. It writes `data/conventions.json`, which `train.py` reads; without it the conditioning is off and every corpus trains as normalized.
+Then run `python scripts/audit_conventions.py` to measure which corpora transcribe diplomatically. It writes `data/conventions.json`, which `train.py` reads; without it the conditioning is off and every corpus trains as normalized. Training also flips each flag per line and rewrites the target to match: turning a flag off normalizes the text, and turning it on needs `convention_image_states.json`, a hand-kept record of what each corpus's images show (`absent`, `printed`, or a restore rule such as `position` for long s).
 
 Datasets, checkpoints and language models are not part of this repository.
 

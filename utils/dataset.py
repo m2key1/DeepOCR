@@ -18,6 +18,7 @@ from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
+from utils.conventions import ConventionTable
 from utils.tokenizer import DeepTokenizer, canonicalize
 
 
@@ -167,7 +168,8 @@ class OCRDataset(Dataset):
         manifest_path: Optional[Path] = None,
         dataset_sources: list[str] = [],
         exclude_datasets: list[str] = [],
-        label_overrides: Optional[dict] = None
+        label_overrides: Optional[dict] = None,
+        conventions: Optional[ConventionTable] = None
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -190,6 +192,7 @@ class OCRDataset(Dataset):
         self.exclude_datasets = set(exclude_datasets)
         # stem -> label, for snapshots that tag each crop with its dataset for per-dataset CER
         self.label_overrides = label_overrides or {}
+        self.conventions = conventions
         self.stem_to_source = self._load_manifest_sources(manifest_path)
 
         if augmentations is None:
@@ -420,16 +423,32 @@ class OCRDataset(Dataset):
             return self.no_aug_augmentations
         return self.augmentations
 
+    def _capacity(self, width: int) -> int:
+        num_patches_w = width // self.patch_size_w
+        num_patches_h = self.target_height // self.patch_size
+        full_grid_capacity = self.use_2d_structure and not self.collapse_height
+        return (num_patches_w * num_patches_h) if full_grid_capacity else num_patches_w
+
     def __getitem__(self, idx):
         augmentations = self._active_augmentations()
         label = self.sample_labels[idx]
         if self.cache_to_ram:
-            image, target_tensor, _ = self.data_pairs[idx]
+            image, target_tensor, text = self.data_pairs[idx]
+            flags = None
+            if self.conventions is not None:
+                sampled_text, flags = self.conventions.sample(label, text)
+                if sampled_text != text:
+                    target_tensor = torch.tensor(self.tokenizer.encode(sampled_text), dtype=torch.long)
+                    if self._capacity(self.sample_widths[idx]) < len(target_tensor):
+                        return None
             if augmentations:
                 image = augmentations(image=image)['image']
-            return image, target_tensor, label
+            return image, target_tensor, label, flags
 
         image_path, text = self.data_pairs[idx]
+        flags = None
+        if self.conventions is not None:
+            text, flags = self.conventions.sample(label, text)
         try:
             image = fill_transparency_with_prominent_color(image_path)
         except (OSError, ValueError) as e:
@@ -441,13 +460,8 @@ class OCRDataset(Dataset):
         if self.max_width and new_width > self.max_width:
             new_width = self.max_width
 
-        num_patches_w = new_width // self.patch_size_w
-        num_patches_h = self.target_height // self.patch_size
-        full_grid_capacity = self.use_2d_structure and not self.collapse_height
-        total_capacity = (num_patches_w * num_patches_h) if full_grid_capacity else num_patches_w
-
         target = self.tokenizer.encode(text)
-        if total_capacity < len(target):
+        if self._capacity(new_width) < len(target):
             return None
 
         image = image.resize((new_width, self.target_height), Image.Resampling.LANCZOS)
@@ -456,7 +470,7 @@ class OCRDataset(Dataset):
         if augmentations:
             image = augmentations(image=image)['image']
 
-        return image, torch.tensor(target, dtype=torch.long), label
+        return image, torch.tensor(target, dtype=torch.long), label, flags
 
 class WidthBucketedBatchSampler(Sampler[list[int]]):
     """Batches samples of similar width together so per-batch padding stays tight. Each epoch,
@@ -547,7 +561,7 @@ class Collate:
         if not batch:
             return None
 
-        images, targets, dataset_labels = zip(*batch)
+        images, targets, dataset_labels, flags = zip(*batch)
         B = len(images)
         C = images[0].shape[0]
 
@@ -603,7 +617,9 @@ class Collate:
         if long_idx:
             print(f"WARNING: Target length > model output length for samples {long_idx}")
 
-        return batched_images, batched_masks, targets_concat, input_lengths, target_lengths, list(dataset_labels)
+        conventions = None if flags[0] is None else torch.tensor(flags, dtype=torch.float32)
+        return (batched_images, batched_masks, targets_concat, input_lengths, target_lengths,
+                list(dataset_labels), conventions)
 
 
 def make_collate_fn(

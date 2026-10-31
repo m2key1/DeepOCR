@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from utils.backbones import build_backbone
+from utils.conventions import remap_convention_columns
 from utils.tokenizer import DeepTokenizer
 
 matplotlib.use('Agg')
@@ -817,15 +818,6 @@ class DeepOCR(nn.Module):
         print(f"  Total:                 {fmt(total)} ({total:,})")
         print(f"  Trainable:             {fmt(trainable)} ({trainable:,})")
 
-    def convention_vector(self, dataset_labels: Sequence[str], device: torch.device) -> Optional[torch.Tensor]:
-        """Flag vector per sample from its dataset label; unknown labels get the normalized
-        convention, all zeros."""
-        if self.convention_proj is None:
-            return None
-        default = [0.0] * len(self.convention_names)
-        rows = [self.convention_by_dataset.get(label, default) for label in dataset_labels]
-        return torch.tensor(rows, dtype=torch.float32, device=device)
-
     def _encode(self,
                 x: torch.Tensor,
                 attention_masks: Optional[torch.Tensor] = None,
@@ -1266,6 +1258,13 @@ class DeepOCR(nn.Module):
                 if dropped:
                     print(f"  dropped (trailing dims changed): {', '.join(sorted(dropped))}")
 
+            old_conventions = list(checkpoint.get('convention_names') or [])
+            if ('convention_proj.weight' in pretrained_state and 'convention_proj.weight' in model_state
+                    and old_conventions != self.convention_names):
+                pretrained_state['convention_proj.weight'] = remap_convention_columns(
+                    pretrained_state['convention_proj.weight'], old_conventions, self.convention_names)
+                print(f"Convention flags remapped by name: {old_conventions} -> {self.convention_names}")
+
             # load_state_dict copies every compatible tensor and then raises on size mismatches,
             # so they are dropped first; vocab-sized tensors were remapped above
             mismatched = [key for key in pretrained_state
@@ -1483,7 +1482,8 @@ class DeepOCR(nn.Module):
             loop = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs}", disable=not is_master)
 
             with profiler_context as prof:
-                for batch_idx, (images, attention_masks, targets, input_lengths, target_lengths, dataset_labels) in enumerate(loop):
+                for batch_idx, (images, attention_masks, targets, input_lengths, target_lengths, dataset_labels,
+                                conventions) in enumerate(loop):
 
                     if is_master and writer and batch_idx == 0:
                         # the only place a transform that erases strokes or washes out the page shows up
@@ -1491,7 +1491,8 @@ class DeepOCR(nn.Module):
                                          torchvision.utils.make_grid(to_display_image(images[:4]), nrow=1),
                                          epoch)
 
-                    conventions = self.convention_vector(dataset_labels, device)
+                    if conventions is not None:
+                        conventions = conventions.to(device, non_blocking=True)
                     images = images.to(device, non_blocking=True)
                     attention_masks = attention_masks.to(device, non_blocking=True)
                     targets = targets.to(device, non_blocking=True)
@@ -1901,7 +1902,8 @@ class DeepOCR(nn.Module):
         random_batch_index = random.randint(0, len(dataloader) - 1)
 
         with torch.no_grad():
-            for batch_idx, (images, attention_masks, targets, input_lengths, target_lengths, dataset_labels) in enumerate(
+            for batch_idx, (images, attention_masks, targets, input_lengths, target_lengths, dataset_labels,
+                            conventions) in enumerate(
                 tqdm(dataloader, desc=f"Validating ({decoding_mode})", leave=False)
             ):
                 images = images.to(device)
@@ -1911,7 +1913,8 @@ class DeepOCR(nn.Module):
                 attention_masks = attention_masks.to(device)
 
                 decoder_ids = None
-                conventions = self.convention_vector(dataset_labels, device)
+                if conventions is not None:
+                    conventions = conventions.to(device)
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                     memory, memory_key_padding_mask, _, _ = self._encode(
                         images, attention_masks=attention_masks, conventions=conventions)

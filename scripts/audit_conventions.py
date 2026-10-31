@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from train import DATASET_SOURCES, DROP_DATASETS, SPLIT_MANIFEST, TRAIN_DATA_DIR
+from utils.conventions import CONVENTIONS
 from utils.dataset import derive_dataset_label
 
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg')
@@ -14,14 +15,8 @@ MIN_LINES = 200
 # Diplomatic and normalized corpora fall far either side of this, so the cut sits in the gap.
 MARKED_RATIO = 0.10
 OUT_PATH = Path('data/conventions.json')
-
-# Each flag pairs the diplomatic form with its normalized counterpart. A corpus
-# gets the flag when it writes the diplomatic form on more than MARKED_RATIO of its occurrences.
-FLAGS = {
-    'long_s': ('ſ', 's'),
-    'oblique_hyphen': ('⸗', '-'),
-    'typographic_punctuation': ('’‘”–', "'\"-"),
-}
+# A corpus gets a flag when it writes the diplomatic form on more than MARKED_RATIO of its occurrences.
+FLAGS = {name: (convention.marked, convention.plain) for name, convention in CONVENTIONS.items()}
 
 
 def iter_labelled_texts():
