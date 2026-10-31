@@ -689,7 +689,7 @@ def _pair_matches_sources(pair: tuple[Path, Path, str], sources: list[str]) -> b
             return True
         # PAGE XML crops live under data_sources/_page_lines/<leaf>/, so match the leaf too.
         leaf = stripped.rsplit('/', 1)[-1]
-        if leaf and f"/{leaf}/" in path_str:
+        if leaf and f"_page_lines/{leaf}/" in path_str:
             return True
     return False
 

@@ -39,8 +39,8 @@ _AMBIGUOUS_LEAVES = {'train', 'valid', 'test', 'full', 'pairs', 'data', 'images'
 
 def derive_dataset_label(source_path: str, dataset_sources: list[str]) -> str:
     """Maps a sample's source path to a dataset label. A dataset_sources entry matches on the whole
-    token or on its leaf as a path component (PAGE XML crops live under _page_lines/<leaf>/), and
-    the leaf becomes the label. Falls back to the path segments after 'data_sources'."""
+    token, or on its leaf directly under _page_lines/ where PAGE XML crops live, and the leaf
+    becomes the label. Falls back to the path segments after 'data_sources'."""
     normalized = source_path.replace('\\', '/')
     for src in dataset_sources:
         token = src.replace('\\', '/').strip('/')
@@ -48,7 +48,7 @@ def derive_dataset_label(source_path: str, dataset_sources: list[str]) -> str:
             continue
         parts = token.split('/')
         leaf = parts[-1]
-        if token in normalized or f'/{leaf}/' in normalized:
+        if token in normalized or f'_page_lines/{leaf}/' in normalized:
             if leaf.lower() in _AMBIGUOUS_LEAVES and len(parts) >= 2:
                 return _sanitize_label('/'.join(parts[-2:]))
             return _sanitize_label(leaf)
@@ -244,7 +244,7 @@ class OCRDataset(Dataset):
         except OSError:
             data_sig = None
         payload = {
-            'v': 1,
+            'v': 2,
             'data_dir': str(Path(self.data_dir).resolve()),
             'data_sig': data_sig,
             'image_extensions': sorted(self.image_extensions),
