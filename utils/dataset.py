@@ -104,6 +104,7 @@ def _process_dataset_item(kwargs):
     patch_size_w = kwargs.get('patch_size_w', patch_size)
     use_2d_structure = kwargs['use_2d_structure']
     collapse_height = kwargs.get('collapse_height', False)
+    alternate_names = kwargs.get('alternate_names', ())
 
     try:
         text = text_path.read_text(encoding='utf-8').strip()
@@ -113,6 +114,12 @@ def _process_dataset_item(kwargs):
 
         if not text:
             return None, 'empty_text'
+
+        alternates = {}
+        for name in alternate_names:
+            alternate_path = image_path.parent / f'{image_path.stem}.{name}.txt'
+            if alternate_path.exists():
+                alternates[name] = canonicalize(alternate_path.read_text(encoding='utf-8').strip())
 
         # UTF-8 bytes bound the token count from above in both tokenizer modes.
         token_length = len(text.encode('utf-8'))
@@ -139,8 +146,8 @@ def _process_dataset_item(kwargs):
 
         if cache_to_ram:
             image = image.resize((new_width, target_height), Image.Resampling.LANCZOS)
-            return (np.array(image), text, new_width), 'success'
-        return (str(image_path), text, new_width), 'success'
+            return (np.array(image), text, new_width, alternates), 'success'
+        return (str(image_path), text, new_width, alternates), 'success'
 
     except Exception:
         return None, 'error'
@@ -244,7 +251,7 @@ class OCRDataset(Dataset):
         except OSError:
             data_sig = None
         payload = {
-            'v': 2,
+            'v': 3,
             'data_dir': str(Path(self.data_dir).resolve()),
             'data_sig': data_sig,
             'image_extensions': sorted(self.image_extensions),
@@ -260,6 +267,7 @@ class OCRDataset(Dataset):
             'use_2d_structure': self.use_2d_structure,
             'collapse_height': self.collapse_height,
             'label_overrides': sorted(self.label_overrides.items()),
+            'alternate_names': self._alternate_names(),
         }
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
         return hashlib.sha1(blob).hexdigest()[:16]
@@ -368,6 +376,7 @@ class OCRDataset(Dataset):
                 'patch_size_w': self.patch_size_w,
                 'use_2d_structure': self.use_2d_structure,
                 'collapse_height': self.collapse_height,
+                'alternate_names': self._alternate_names(),
             })
 
         data_pairs = []
@@ -386,12 +395,12 @@ class OCRDataset(Dataset):
         for (res, status), (src_image_path, _) in zip(results, valid_paths):
             if status == 'success' and res is not None:
                 if self.cache_to_ram:
-                    image_array, text, width = res
+                    image_array, text, width, alternates = res
                     target = self.tokenizer.encode(text)
-                    data_pairs.append((image_array, torch.tensor(target, dtype=torch.long), text))
+                    data_pairs.append((image_array, torch.tensor(target, dtype=torch.long), text, alternates))
                 else:
-                    image_path, text, width = res
-                    data_pairs.append((image_path, text))
+                    image_path, text, width, alternates = res
+                    data_pairs.append((image_path, text, alternates))
                 sample_labels.append(self._label_for(src_image_path))
                 sample_widths.append(width)
 
@@ -423,6 +432,9 @@ class OCRDataset(Dataset):
             return self.no_aug_augmentations
         return self.augmentations
 
+    def _alternate_names(self) -> list[str]:
+        return list(self.conventions.names) if self.conventions is not None else []
+
     def _capacity(self, width: int) -> int:
         num_patches_w = width // self.patch_size_w
         num_patches_h = self.target_height // self.patch_size
@@ -433,10 +445,10 @@ class OCRDataset(Dataset):
         augmentations = self._active_augmentations()
         label = self.sample_labels[idx]
         if self.cache_to_ram:
-            image, target_tensor, text = self.data_pairs[idx]
+            image, target_tensor, text, alternates = self.data_pairs[idx]
             flags = None
             if self.conventions is not None:
-                sampled_text, flags = self.conventions.sample(label, text)
+                sampled_text, flags = self.conventions.sample(label, text, alternates)
                 if sampled_text != text:
                     target_tensor = torch.tensor(self.tokenizer.encode(sampled_text), dtype=torch.long)
                     if self._capacity(self.sample_widths[idx]) < len(target_tensor):
@@ -445,10 +457,10 @@ class OCRDataset(Dataset):
                 image = augmentations(image=image)['image']
             return image, target_tensor, label, flags
 
-        image_path, text = self.data_pairs[idx]
+        image_path, text, alternates = self.data_pairs[idx]
         flags = None
         if self.conventions is not None:
-            text, flags = self.conventions.sample(label, text)
+            text, flags = self.conventions.sample(label, text, alternates)
         try:
             image = fill_transparency_with_prominent_color(image_path)
         except (OSError, ValueError) as e:

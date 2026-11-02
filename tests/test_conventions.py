@@ -1,12 +1,17 @@
+import os
 import random
+import tempfile
 import unittest
+from pathlib import Path
 
 import torch
+from PIL import Image
 
 from utils.conventions import (ConventionTable, normalize_long_s, normalize_typographic_punctuation,
                                remap_convention_columns, restore_long_s_by_position,
                                restore_long_s_german)
-from utils.dataset import Collate
+from utils.dataset import Collate, OCRDataset
+from utils.tokenizer import DeepTokenizer
 
 NAMES = ['long_s', 'oblique_hyphen', 'app_defined']
 
@@ -64,8 +69,23 @@ class Sample(unittest.TestCase):
 
     def test_each_flag_flips_independently(self):
         rng = random.Random(0)
-        outcomes = {table(flip_prob=0.5).sample('diplomatic', 'Waſſer⸗', rng)[0] for _ in range(200)}
+        outcomes = {table(flip_prob=0.5).sample('diplomatic', 'Waſſer⸗', rng=rng)[0] for _ in range(200)}
         self.assertEqual(outcomes, {'Waſſer⸗', 'Wasser⸗', 'Waſſer-', 'Wasser-'})
+
+    def test_a_line_with_an_alternate_target_flips_to_it(self):
+        states = ConventionTable(['long_s', 'expand_abbreviations'], {}, flip_prob=1.0)
+        result = states.sample('compass', 'Gschf.: Haus', {'expand_abbreviations': 'Geschäftsführer: Haus'})
+        self.assertEqual(result, ('Geschäftsführer: Haus', [0.0, 1.0]))
+
+    def test_other_flags_still_transform_the_alternate_target(self):
+        states = ConventionTable(['long_s', 'expand_abbreviations'], {'fraktur': [1.0, 0.0]}, flip_prob=1.0)
+        result = states.sample('fraktur', 'Geſ. m. b. H.', {'expand_abbreviations': 'Geſellſchaft'})
+        self.assertEqual(result, ('Gesellschaft', [0.0, 1.0]))
+
+    def test_without_flipping_the_alternate_target_is_ignored(self):
+        states = ConventionTable(['expand_abbreviations'], {}, flip_prob=0.0)
+        self.assertEqual(states.sample('compass', 'Gschf.', {'expand_abbreviations': 'Geschäftsführer'}),
+                         ('Gschf.', [0.0]))
 
     def test_an_unknown_state_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "state 'yes' for 'fraktur'"):
@@ -74,6 +94,22 @@ class Sample(unittest.TestCase):
     def test_image_state_labels_without_samples_are_reported(self):
         states = table({'long_s': {'fraktur': 'german', 'frakture': 'german'}})
         self.assertEqual(states.unseen_labels({'fraktur', 'diplomatic'}), {'long_s': ['frakture']})
+
+
+class AlternateTargetsOnDisk(unittest.TestCase):
+    def test_the_dataset_reads_each_known_flags_alternate_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            Image.new('RGB', (400, 32), 'white').save(folder / 'line.png')
+            (folder / 'line.gt.txt').write_text('Gschf.: Haus', encoding='utf-8')
+            (folder / 'line.expand_abbreviations.txt').write_text('Geschäftsführer: Haus', encoding='utf-8')
+            dataset = OCRDataset(folder, DeepTokenizer(verbose=False), target_height=32, patch_size=32,
+                                 patch_size_w=8, use_2d_structure=False,
+                                 conventions=ConventionTable(['expand_abbreviations'], {}, flip_prob=1.0))
+            # canonicalize decomposes umlauts, as it does for the GT
+            self.assertEqual(dataset.data_pairs[0][1:],
+                             ('Gschf.: Haus', {'expand_abbreviations': 'Gescha\u0308ftsfu\u0308hrer: Haus'}))
+            self.assertEqual(dataset[0][3], [1.0])
 
 
 class RemapColumns(unittest.TestCase):
@@ -98,6 +134,8 @@ class CollateFlags(unittest.TestCase):
         self.assertIsNone(batch[-1])
         self.assertEqual(batch[-2], ['label'])
 
+
+os.environ.setdefault('OCR_PAIR_CACHE', '0')
 
 if __name__ == '__main__':
     unittest.main()
