@@ -129,11 +129,16 @@ class ConventionTable:
 
 def remap_convention_columns(weight: torch.Tensor, old_names: Sequence[str],
                              new_names: Sequence[str]) -> torch.Tensor:
-    """Carries a convention projection across a changed flag list by name. New flags get zero
-    columns, so a warm-started model behaves as before until it trains on them."""
+    """Carries a convention projection across a changed flag list by name. A new flag gets a
+    random column as long as the trained ones: a flag that is off contributes nothing, so the
+    model behaves as before, and one that is on starts with a signal it cannot average away."""
     old_column = {name: i for i, name in enumerate(old_names)}
     remapped = weight.new_zeros(weight.shape[0], len(new_names))
+    trained_norm = weight.norm(dim=0).mean() if weight.shape[1] else weight.new_zeros(())
     for new_index, name in enumerate(new_names):
         if name in old_column:
             remapped[:, new_index] = weight[:, old_column[name]]
+        else:
+            direction = torch.randn(weight.shape[0], dtype=weight.dtype, device=weight.device)
+            remapped[:, new_index] = direction / direction.norm() * trained_norm
     return remapped

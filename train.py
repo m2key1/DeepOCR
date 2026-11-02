@@ -90,6 +90,8 @@ CONVENTION_IMAGE_STATES_PATH = Path('convention_image_states.json')
 CONVENTION_IMAGE_STATES = (json.loads(CONVENTION_IMAGE_STATES_PATH.read_text(encoding='utf-8'))
                            if CONVENTION_IMAGE_STATES_PATH.exists() else {})
 CONVENTION_FLIP_PROB = 0.5
+# The flag projection is one small layer that a new flag must grow from scratch, so it gets its own rate.
+CONVENTION_LR = 1e-3
 WARMUP_ROUTER_EPOCHS = 0
 
 USE_DECODER = True
@@ -211,7 +213,7 @@ APP_TUNABLES = (
     'SCALAR_LOG_INTERVAL',
     'SELECT_ON_DECODER', 'SAVE_BEST_OF_HEADS',
     'FREEZE_BACKBONE', 'RESET_EXPERTS', 'RESET_MOE_ROUTER', 'WARMUP_ROUTER_EPOCHS',
-    'DECODER_WARMUP_EPOCHS', 'SAMPLER_SEED', 'NUM_WORKERS',
+    'DECODER_WARMUP_EPOCHS', 'SAMPLER_SEED', 'NUM_WORKERS', 'CONVENTION_LR',
 )
 
 
@@ -603,7 +605,7 @@ def main():
         worker_init_fn=worker_init,
     )
 
-    backbone_params, decoder_params, transformer_params = [], [], []
+    backbone_params, decoder_params, transformer_params, convention_params = [], [], [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
@@ -611,6 +613,8 @@ def main():
             backbone_params.append(param)
         elif name.startswith('decoder'):
             decoder_params.append(param)
+        elif name.startswith('convention_proj.'):
+            convention_params.append(param)
         else:
             transformer_params.append(param)
 
@@ -631,6 +635,14 @@ def main():
         })
         if is_master:
             print(f"Decoder param group: {len(decoder_params)} tensors at LR {dynamic_decoder_lr:.6f}")
+    if convention_params:
+        param_groups.append({
+            'params': convention_params,
+            'lr': CONVENTION_LR,
+            'weight_decay': WEIGHT_DECAY
+        })
+        if is_master:
+            print(f"Convention param group: {len(convention_params)} tensors at LR {CONVENTION_LR:.6f}")
 
     optimizer = torch.optim.AdamW(param_groups, fused=True)
 

@@ -113,11 +113,21 @@ class AlternateTargetsOnDisk(unittest.TestCase):
 
 
 class RemapColumns(unittest.TestCase):
-    def test_columns_follow_their_names_and_new_flags_start_at_zero(self):
-        weight = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    def test_columns_follow_their_names(self):
+        weight = torch.tensor([[3.0, 0.0], [4.0, 6.0]])
         remapped = remap_convention_columns(weight, ['long_s', 'oblique_hyphen'],
                                             ['oblique_hyphen', 'abbreviations', 'long_s'])
-        self.assertTrue(torch.equal(remapped, torch.tensor([[2.0, 0.0, 1.0], [4.0, 0.0, 3.0]])))
+        self.assertTrue(torch.equal(remapped[:, [0, 2]], torch.tensor([[0.0, 3.0], [6.0, 4.0]])))
+
+    def test_a_new_flag_starts_as_long_as_the_trained_ones(self):
+        weight = torch.tensor([[3.0, 0.0], [4.0, 6.0]])
+        remapped = remap_convention_columns(weight, ['long_s', 'oblique_hyphen'],
+                                            ['oblique_hyphen', 'abbreviations', 'long_s'])
+        self.assertAlmostEqual(remapped[:, 1].norm().item(), 5.5, places=5)
+
+    def test_without_trained_flags_a_new_one_starts_at_zero(self):
+        remapped = remap_convention_columns(torch.zeros(2, 0), [], ['abbreviations'])
+        self.assertTrue(torch.equal(remapped, torch.zeros(2, 1)))
 
 
 class CollateFlags(unittest.TestCase):
