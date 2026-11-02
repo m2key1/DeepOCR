@@ -16,7 +16,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from utils.conventions import ConventionTable
+from utils.conventions import ConventionTable, hold_trained_flags_to_rate
 from utils.dataset import OCRDataset, WidthBucketedBatchSampler, make_collate_fn, worker_init
 from utils.loss import CTCLossWithSmoothing
 from utils.model import DeepOCR
@@ -90,7 +90,8 @@ CONVENTION_IMAGE_STATES_PATH = Path('convention_image_states.json')
 CONVENTION_IMAGE_STATES = (json.loads(CONVENTION_IMAGE_STATES_PATH.read_text(encoding='utf-8'))
                            if CONVENTION_IMAGE_STATES_PATH.exists() else {})
 CONVENTION_FLIP_PROB = 0.5
-# The flag projection is one small layer that a new flag must grow from scratch, so it gets its own rate.
+# A flag new to the warm-start checkpoint must grow from scratch, so it gets its own rate; trained
+# flags keep the encoder rate.
 CONVENTION_LR = 1e-3
 WARMUP_ROUTER_EPOCHS = 0
 
@@ -642,9 +643,15 @@ def main():
             'weight_decay': WEIGHT_DECAY
         })
         if is_master:
-            print(f"Convention param group: {len(convention_params)} tensors at LR {CONVENTION_LR:.6f}")
+            print(f"Convention param group at LR {CONVENTION_LR:.6f} for new flags "
+                  f"{model.new_convention_names or 'none'}; trained flags follow the encoder rate")
 
     optimizer = torch.optim.AdamW(param_groups, fused=True)
+    if convention_params:
+        hold_trained_flags_to_rate(optimizer, model.convention_proj.weight, model.convention_names,
+                                   lambda: model.new_convention_names,
+                                   slow_group=optimizer.param_groups[1],
+                                   fast_group=optimizer.param_groups[-1])
 
     steps_per_epoch = len(train_dataloader)
     total_steps = EPOCHS * steps_per_epoch

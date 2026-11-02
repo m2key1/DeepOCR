@@ -7,7 +7,8 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from utils.conventions import (ConventionTable, normalize_long_s, normalize_typographic_punctuation,
+from utils.conventions import (ConventionTable, hold_trained_flags_to_rate, normalize_long_s,
+                               normalize_typographic_punctuation,
                                remap_convention_columns, restore_long_s_by_position,
                                restore_long_s_german)
 from utils.dataset import Collate, OCRDataset
@@ -128,6 +129,27 @@ class RemapColumns(unittest.TestCase):
     def test_without_trained_flags_a_new_one_starts_at_zero(self):
         remapped = remap_convention_columns(torch.zeros(2, 0), [], ['abbreviations'])
         self.assertTrue(torch.equal(remapped, torch.zeros(2, 1)))
+
+
+class TrainedFlagRate(unittest.TestCase):
+    def step(self, new_names):
+        projection = torch.nn.Linear(2, 1, bias=False)
+        torch.nn.init.zeros_(projection.weight)
+        encoder_weight = torch.nn.Parameter(torch.zeros(1))
+        optimizer = torch.optim.SGD([{'params': [encoder_weight], 'lr': 0.1},
+                                     {'params': [projection.weight], 'lr': 1.0}])
+        hold_trained_flags_to_rate(optimizer, projection.weight, ['long_s', 'abbreviations'],
+                                   lambda: new_names, slow_group=optimizer.param_groups[0],
+                                   fast_group=optimizer.param_groups[1])
+        projection.weight.grad = torch.ones_like(projection.weight)
+        optimizer.step()
+        return projection.weight.detach()
+
+    def test_a_trained_flag_moves_at_the_encoder_rate_and_a_new_one_at_the_flag_rate(self):
+        self.assertTrue(torch.allclose(self.step(['abbreviations']), torch.tensor([[-0.1, -1.0]])))
+
+    def test_without_new_flags_every_flag_moves_at_the_encoder_rate(self):
+        self.assertTrue(torch.allclose(self.step([]), torch.tensor([[-0.1, -0.1]])))
 
 
 class CollateFlags(unittest.TestCase):

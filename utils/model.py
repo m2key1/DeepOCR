@@ -673,6 +673,7 @@ class DeepOCR(nn.Module):
                                 if self.convention_names else None)
         if self.convention_proj is not None:
             nn.init.zeros_(self.convention_proj.weight)
+        self.new_convention_names: List[str] = []
 
         self.num_layers = num_encoder_layers
         drop_path_rates = [drop_path * i / max(1, self.num_layers - 1) for i in range(self.num_layers)]
@@ -1259,6 +1260,9 @@ class DeepOCR(nn.Module):
                     print(f"  dropped (trailing dims changed): {', '.join(sorted(dropped))}")
 
             old_conventions = list(checkpoint.get('convention_names') or [])
+            if 'convention_proj.weight' in model_state:
+                known = old_conventions if 'convention_proj.weight' in pretrained_state else []
+                self.new_convention_names = [name for name in self.convention_names if name not in known]
             if ('convention_proj.weight' in pretrained_state and 'convention_proj.weight' in model_state
                     and old_conventions != self.convention_names):
                 pretrained_state['convention_proj.weight'] = remap_convention_columns(
@@ -1418,6 +1422,7 @@ class DeepOCR(nn.Module):
             best_cer = resume_state.get('best_cer', float('inf'))
             best_val_loss = resume_state.get('best_val_loss', float('inf'))
             rounds_since_best = resume_state.get('rounds_since_best', 0)
+            self.new_convention_names = resume_state.get('new_convention_names', [])
             del resume_state
             if is_master:
                 print(f"Resumed from {resume_checkpoint}: continuing at epoch "
@@ -1819,6 +1824,7 @@ class DeepOCR(nn.Module):
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
                     'tokenizer_tokens': self.tokenizer.tokens_list,
+                    'new_convention_names': self.new_convention_names,
                 }, checkpoint_tmp)
                 checkpoint_tmp.replace(log_dir / 'last_checkpoint.pt')
 

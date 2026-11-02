@@ -142,3 +142,29 @@ def remap_convention_columns(weight: torch.Tensor, old_names: Sequence[str],
             direction = torch.randn(weight.shape[0], dtype=weight.dtype, device=weight.device)
             remapped[:, new_index] = direction / direction.norm() * trained_norm
     return remapped
+
+
+def hold_trained_flags_to_rate(optimizer: torch.optim.Optimizer, weight: torch.Tensor,
+                               names: Sequence[str], new_names: Callable[[], Sequence[str]],
+                               slow_group: dict, fast_group: dict):
+    """The projection is one tensor in the fast group, but only new flags need the fast rate.
+    After each step the trained columns' update is scaled back to the slow group's rate; new_names
+    is read per step because a resumed run restores it after the optimizer is built."""
+    weight_before_step = {}
+
+    def remember(optimizer, args, kwargs):
+        weight_before_step['weight'] = weight.detach().clone()
+
+    def slow_down_trained(optimizer, args, kwargs):
+        before = weight_before_step.pop('weight')
+        new = set(new_names())
+        trained = [index for index, name in enumerate(names) if name not in new]
+        if not trained:
+            return
+        rate_ratio = slow_group['lr'] / fast_group['lr'] if fast_group['lr'] else 0.0
+        with torch.no_grad():
+            old = before[:, trained]
+            weight[:, trained] = old + (weight[:, trained] - old) * rate_ratio
+
+    optimizer.register_step_pre_hook(remember)
+    optimizer.register_step_post_hook(slow_down_trained)
