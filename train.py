@@ -149,6 +149,10 @@ VAL_FREQUENCY = 1
 
 BUCKET_SIZE_MULTIPLIER = 50
 SAMPLER_SEED = 0
+# Each epoch draws every corpus in proportion to its size to this power; 1.0 keeps the natural mix.
+CORPUS_SAMPLING_ALPHA = 0.5
+# Upper bound on how often a small corpus repeats within one epoch.
+CORPUS_MAX_REPEAT = 5
 # Build on unfolded text: an LM that never saw a long s steers beam search away from it. A dict
 # that is not index-parallel to the tokenizer is refused and beam search runs without the LM.
 KENLM_PATH = Path('data/lm/union_bytes_v3.bin')
@@ -232,6 +236,7 @@ APP_TUNABLES = (
     'SELECT_ON_DECODER', 'SAVE_BEST_OF_HEADS',
     'FREEZE_BACKBONE', 'RESET_EXPERTS', 'RESET_MOE_ROUTER', 'WARMUP_ROUTER_EPOCHS',
     'DECODER_WARMUP_EPOCHS', 'SAMPLER_SEED', 'NUM_WORKERS', 'CONVENTION_LR',
+    'CORPUS_SAMPLING_ALPHA', 'CORPUS_MAX_REPEAT',
     'DECODER_TYPE', 'TOKEN_DECODER_NEW_LR', 'TOKEN_DECODER_INPUT_NOISE', 'FREEZE_ENCODER',
 )
 
@@ -594,6 +599,9 @@ def main():
         shuffle=True,
         seed=SAMPLER_SEED,
         bucket_size_multiplier=BUCKET_SIZE_MULTIPLIER,
+        labels=train_dataset.sample_labels,
+        sampling_alpha=CORPUS_SAMPLING_ALPHA,
+        max_repeat=CORPUS_MAX_REPEAT,
     )
 
     train_dataloader = DataLoader(

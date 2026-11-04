@@ -181,6 +181,8 @@ sbatch train.slurm
 
 Each run writes to `runs/ocr_<timestamp>/`: `best_model.pt` (selected on validation CER), a rolling `last_checkpoint.pt` for resume, and TensorBoard logs. `runs/latest_run` points at the newest run.
 
+Each epoch draws every corpus in proportion to the square root of its size (`CORPUS_SAMPLING_ALPHA`), so large corpora are subsampled, in an order that reaches all their lines over several epochs, and small ones repeat at most `CORPUS_MAX_REPEAT` times.
+
 Validation reports greedy CER/WER every epoch, overall and per source dataset; beam search and decoder rescoring run every `BEAM_VAL_FREQUENCY` / `DECODER_VAL_FREQUENCY` epochs.
 
 </details>

@@ -1,3 +1,4 @@
+import collections
 import os
 import json
 import math
@@ -484,6 +485,27 @@ class OCRDataset(Dataset):
 
         return image, torch.tensor(target, dtype=torch.long), label, flags
 
+def corpus_epoch_indices(labels: list[str], alpha: float, max_repeat: int, epoch: int, seed: int) -> list[int]:
+    """One epoch's lines when each corpus is drawn in proportion to its size to the power alpha, so
+    large corpora do not drown small ones; a corpus repeats at most max_repeat times. A subsampled
+    corpus walks through a fixed shuffle of its lines, so later epochs show the lines it skipped."""
+    by_corpus = collections.defaultdict(list)
+    for index, label in enumerate(labels):
+        by_corpus[label].append(index)
+    corpora = sorted(by_corpus)
+    weights = [len(by_corpus[label]) ** alpha for label in corpora]
+    total_weight = sum(weights)
+    indices = []
+    for position, (label, weight) in enumerate(zip(corpora, weights)):
+        members = by_corpus[label]
+        quota = min(round(len(labels) * weight / total_weight), max_repeat * len(members))
+        order = members[:]
+        random.Random(seed * 1_000_003 + position).shuffle(order)
+        start = epoch * quota
+        indices.extend(order[(start + k) % len(order)] for k in range(quota))
+    return indices
+
+
 class WidthBucketedBatchSampler(Sampler[list[int]]):
     """Batches samples of similar width together so per-batch padding stays tight. Each epoch,
     a seeded shuffle is chunked into windows, each window is sorted by width and sliced into
@@ -499,6 +521,9 @@ class WidthBucketedBatchSampler(Sampler[list[int]]):
         shuffle: bool = True,
         seed: int = 0,
         bucket_size_multiplier: int = 50,
+        labels: Optional[list[str]] = None,
+        sampling_alpha: float = 1.0,
+        max_repeat: int = 1,
     ):
         self.widths = torch.tensor(widths, dtype=torch.long)
         self.batch_size = batch_size
@@ -507,23 +532,31 @@ class WidthBucketedBatchSampler(Sampler[list[int]]):
         self.shuffle = shuffle
         self.seed = seed
         self.window_size = batch_size * bucket_size_multiplier
+        self.labels = labels
+        self.sampling_alpha = sampling_alpha
+        self.max_repeat = max_repeat
         self.epoch = 0
+        self.epoch_size = len(self._epoch_indices()) if labels is not None else len(widths)
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
+    def _epoch_indices(self) -> list[int]:
+        return corpus_epoch_indices(self.labels, self.sampling_alpha, self.max_repeat, self.epoch, self.seed)
+
     def __len__(self) -> int:
-        return math.ceil(len(self.widths) / self.batch_size) // self.num_replicas
+        return math.ceil(self.epoch_size / self.batch_size) // self.num_replicas
 
     def __iter__(self) -> Iterator[list[int]]:
-        n = len(self.widths)
+        drawn = torch.tensor(self._epoch_indices()) if self.labels is not None else torch.arange(len(self.widths))
+        n = len(drawn)
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch)
 
         if self.shuffle:
-            order = torch.randperm(n, generator=generator)
+            order = drawn[torch.randperm(n, generator=generator)]
         else:
-            order = torch.arange(n)
+            order = drawn
 
         batches = []
         for start in range(0, n, self.window_size):
