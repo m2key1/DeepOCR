@@ -10,6 +10,8 @@ GERMAN_LONG_S_BEFORE = frozenset('aäceioöpſstuüyzAÄCEIOÖPSTUÜYZ')
 # appears, 'printed' means it does but no restore rule is trusted, and a restorer name means it
 # does and that rule rebuilds it.
 IMAGE_STATES = ('absent', 'printed')
+# <stem>.diplomatic.txt: the line with every mark its GT normalizes read back from the image
+DIPLOMATIC = 'diplomatic'
 
 
 @dataclass(frozen=True)
@@ -74,8 +76,9 @@ CONVENTIONS = {convention.name: convention for convention in (
 class ConventionTable:
     """Per-line convention flags, and the augmentation that flips them. With flip_prob p each
     flag of a sample flips with probability p, rewriting the target to match: a diplomatic line
-    is normalized, a normalized line is kept or restored when its corpus's images allow it, and a
-    line that ships its target for a flag (alternates) can switch to it. Flags missing from
+    is normalized, a normalized line is kept or restored when its corpus's images allow it, a line
+    that ships its diplomatic reading trains like a diplomatic line, and a line that ships its
+    target for a flag (alternates) can switch to it. Flags missing from
     CONVENTIONS, such as ones a training app defines, flip only through alternates."""
 
     def __init__(self, names: Sequence[str], by_dataset: dict, image_states: Optional[dict] = None,
@@ -98,13 +101,25 @@ class ConventionTable:
         flags = self.flags(label)
         if not self.flip_prob:
             return text, flags
+        alternates = alternates or {}
+        restored = set()
+        if DIPLOMATIC in alternates:
+            # the diplomatic reading carries every mark, so it trains like a diplomatic corpus
+            text = alternates[DIPLOMATIC]
+            restored = {i for i, name in enumerate(self.names)
+                        if name in CONVENTIONS and CONVENTIONS[name].normalize is not None and not flags[i]}
+            for i in restored:
+                flags[i] = 1.0
         decided = set()
         # an alternate is written from the GT, so it is chosen before other flags transform the text
         for i, name in enumerate(self.names):
-            if not flags[i] and name in (alternates or {}):
+            if not flags[i] and name in alternates:
                 decided.add(i)
                 if rng.random() < self.flip_prob:
                     text, flags[i] = alternates[name], 1.0
+                    for j in restored:
+                        flags[j] = 0.0
+                    restored = set()
         for i, name in enumerate(self.names):
             convention = CONVENTIONS.get(name)
             if i in decided or convention is None or rng.random() >= self.flip_prob:

@@ -88,6 +88,31 @@ class Sample(unittest.TestCase):
         self.assertEqual(states.sample('compass', 'Gschf.', {'expand_abbreviations': 'Geschäftsführer'}),
                          ('Gschf.', [0.0]))
 
+    def test_a_line_read_from_its_image_trains_under_every_flag_combination(self):
+        states = ConventionTable(['long_s', 'oblique_hyphen'], {'kurrent': [0.0, 0.0]}, flip_prob=0.5)
+        rng = random.Random(0)
+        outcomes = {(text, tuple(flags)) for text, flags in
+                    (states.sample('kurrent', 'Wasser-', {'diplomatic': 'Waſſer⸗'}, rng=rng) for _ in range(200))}
+        self.assertEqual(outcomes, {('Waſſer⸗', (1.0, 1.0)), ('Wasser⸗', (0.0, 1.0)),
+                                    ('Waſſer-', (1.0, 0.0)), ('Wasser-', (0.0, 0.0))})
+
+    def test_a_flag_the_corpus_already_keeps_stays_as_transcribed(self):
+        states = ConventionTable(['long_s', 'typographic_punctuation'], {'hsa': [0.0, 1.0]}, flip_prob=0.5)
+        rng = random.Random(1)
+        texts = {states.sample('hsa', '„Haus“ – Wasser', {'diplomatic': '„Haus“ – Waſſer'}, rng=rng)[0]
+                 for _ in range(200)}
+        self.assertEqual(texts, {'„Haus“ – Waſſer', '„Haus“ – Wasser', '„Haus“ - Waſſer', '„Haus“ - Wasser'})
+
+    def test_without_flipping_the_line_read_from_its_image_is_ignored(self):
+        states = ConventionTable(['long_s'], {'kurrent': [0.0]}, flip_prob=0.0)
+        self.assertEqual(states.sample('kurrent', 'Wasser', {'diplomatic': 'Waſſer'}), ('Wasser', [0.0]))
+
+    def test_an_alternate_target_replaces_the_marks_read_from_the_image(self):
+        states = ConventionTable(['long_s', 'expand_abbreviations'], {'fraktur': [0.0, 0.0]}, flip_prob=1.0)
+        result = states.sample('fraktur', 'Ges. m. b. H.',
+                               {'diplomatic': 'Geſ. m. b. H.', 'expand_abbreviations': 'Gesellschaft'})
+        self.assertEqual(result, ('Gesellschaft', [0.0, 1.0]))
+
     def test_an_unknown_state_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "state 'yes' for 'fraktur'"):
             table({'long_s': {'fraktur': 'yes'}})
@@ -111,6 +136,17 @@ class AlternateTargetsOnDisk(unittest.TestCase):
             self.assertEqual(dataset.data_pairs[0][1:],
                              ('Gschf.: Haus', {'expand_abbreviations': 'Gescha\u0308ftsfu\u0308hrer: Haus'}))
             self.assertEqual(dataset[0][3], [1.0])
+
+    def test_the_dataset_reads_the_line_read_from_its_image(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            Image.new('RGB', (400, 32), 'white').save(folder / 'line.png')
+            (folder / 'line.gt.txt').write_text('Wasser', encoding='utf-8')
+            (folder / 'line.diplomatic.txt').write_text('Waſſer', encoding='utf-8')
+            dataset = OCRDataset(folder, DeepTokenizer(verbose=False), target_height=32, patch_size=32,
+                                 patch_size_w=8, use_2d_structure=False,
+                                 conventions=ConventionTable(['long_s'], {}, flip_prob=0.0))
+            self.assertEqual(dataset.data_pairs[0][1:], ('Wasser', {'diplomatic': 'Waſſer'}))
 
 
 class RemapColumns(unittest.TestCase):

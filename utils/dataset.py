@@ -18,7 +18,7 @@ from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
-from utils.conventions import ConventionTable
+from utils.conventions import DIPLOMATIC, ConventionTable
 from utils.tokenizer import DeepTokenizer, canonicalize
 
 # Batches travel as raw bytes and the model normalizes them, so padding is plain white.
@@ -433,7 +433,7 @@ class OCRDataset(Dataset):
         return self.augmentations
 
     def _alternate_names(self) -> list[str]:
-        return list(self.conventions.names) if self.conventions is not None else []
+        return [*self.conventions.names, DIPLOMATIC] if self.conventions is not None else []
 
     def _capacity(self, width: int) -> int:
         num_patches_w = width // self.patch_size_w
