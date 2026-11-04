@@ -155,7 +155,8 @@ LM_WEIGHT = 1.0 # swept optimum for this LM; re-sweep when the LM or vocab chang
 
 CACHE_TO_RAM = False
 EXCLUDE_DATA = []
-IMAGENET_NORMALIZED_WHITE = (1.0 - 0.456) / 0.224
+# Batches travel as raw bytes and the model normalizes them, so padding is plain white.
+PAD_WHITE = 255
 INCLUDE_DATA = []
 # Per rank. Each spawn worker holds a copy of the dataset, so host RAM scales with GPUs x workers x
 # prefetch.
@@ -311,14 +312,13 @@ def _scaled(low: float, high: float) -> tuple[int, int]:
 
 
 def get_transforms() -> tuple[A.Compose, A.Compose]:
-    val_transform = A.Compose([A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)), ToTensorV2()])
+    val_transform = A.Compose([ToTensorV2()])
 
     if os.environ.get('TRAIN_AUGMENT'):
-        # Normalisation and the tensor conversion are appended so a saved stack cannot omit them.
+        # The tensor conversion is appended so a saved stack cannot omit it.
         spec = json.loads(Path(os.environ['TRAIN_AUGMENT']).read_text(encoding='utf-8'))
         steps = list(A.from_dict(_respelled(spec)))
-        return A.Compose([*steps, A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-                          ToTensorV2()]), val_transform
+        return A.Compose([*steps, ToTensorV2()]), val_transform
 
     train_transform = A.Compose([
         A.Affine(
@@ -359,7 +359,6 @@ def get_transforms() -> tuple[A.Compose, A.Compose]:
         A.PixelDropout(dropout_prob=0.05, per_channel=True, p=0.3),
         A.CoarseDropout(num_holes_range=(1, 5), hole_height_range=(0.05, 0.15), hole_width_range=(0.02, 0.08), fill=0, p=0.3),
         A.Spatter(mode='mud', color=(0, 0, 0), p=0.2),
-        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2()
     ])
     return train_transform, val_transform
@@ -587,7 +586,7 @@ def main():
         patch_size=model.patch_size,
         patch_size_w=model.patch_size_w,
         use_2d_structure=USE_2D_STRUCTURE,
-        fill_value=IMAGENET_NORMALIZED_WHITE,
+        fill_value=PAD_WHITE,
         collapse_height=COLLAPSE_HEIGHT_FOR_CTC
     )
 

@@ -42,7 +42,19 @@ DECODER_BYTE_SLACK = 1.3
 DECODER_BYTE_MARGIN = 8
 
 
+def normalize_images(images: torch.Tensor) -> torch.Tensor:
+    """Data loaders ship raw bytes, a quarter of the size of normalized floats; anything already
+    floating point is taken as normalized."""
+    if images.dtype != torch.uint8:
+        return images
+    mean = torch.tensor(IMAGENET_MEAN, device=images.device).view(1, -1, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=images.device).view(1, -1, 1, 1)
+    return (images.float() / 255.0 - mean) / std
+
+
 def to_display_image(images: torch.Tensor) -> torch.Tensor:
+    if images.dtype == torch.uint8:
+        return images.detach().float().cpu() / 255.0
     mean = torch.as_tensor(IMAGENET_MEAN).view(-1, 1, 1)
     std = torch.as_tensor(IMAGENET_STD).view(-1, 1, 1)
     return (images.detach().float().cpu() * std + mean).clamp(0, 1)
@@ -865,6 +877,7 @@ class DeepOCR(nn.Module):
                 conventions: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, torch.Tensor], Dict]:
 
         B = x.size(0)
+        x = normalize_images(x)
 
         with torch.set_grad_enabled(not self.freeze_backbone):
             feature_grid = self.backbone(x)    # [B, grid_height, grid_width, feature_dim]
