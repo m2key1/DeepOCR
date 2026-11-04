@@ -29,6 +29,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from utils.backbones import build_backbone
 from utils.conventions import remap_convention_columns
+from utils.dataset import PAD_WHITE, Collate
 from utils.token_decoder import END_TOKEN_ID as TOKEN_DECODER_END_ID, PAD_TOKEN_ID as TOKEN_DECODER_PAD_ID, TokenDecoder
 from utils.tokenizer import DeepTokenizer, canonicalize
 
@@ -2272,7 +2273,6 @@ class DeepOCR(nn.Module):
         beam_width: int = 10,
         length_penalty: float = 0.1,
         blank_penalty: float = 0.0,
-        fill_value: float = 1.0,
         debug: bool = False,
         use_decoder: bool = False,
         decoder_max_len: int = 256
@@ -2281,12 +2281,10 @@ class DeepOCR(nn.Module):
         self.eval()
         use_decoder = use_decoder and self.use_decoder
 
-        normalize_transform = A.Compose([
-            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-            ToTensorV2()
-        ])
+        collate = Collate(self.patch_size, self.patch_size_w, self.use_2d_structure, fill_value=PAD_WHITE,
+                          collapse_height=self.collapse_height_for_ctc)
 
-        def _process_pil_image(img: Image.Image) -> Tuple[torch.Tensor, int]:
+        def _process_pil_image(img: Image.Image) -> torch.Tensor:
             """Transparent pixels take the most common opaque colour."""
             img = img.convert('RGBA')
             img_array = np.array(img)
@@ -2308,118 +2306,74 @@ class DeepOCR(nn.Module):
                 img = img.convert('RGB')
 
             w, h = img.size
-            new_width = int(w * (self.target_height / h))
+            new_width = max(1, int(w * (self.target_height / h)))
             if self.max_width and new_width > self.max_width:
                 new_width = self.max_width
 
             img = img.resize((new_width, self.target_height), Image.Resampling.LANCZOS)
-            tensor = normalize_transform(image=np.array(img))['image']
+            return torch.from_numpy(np.array(img)).permute(2, 0, 1).contiguous()
 
-            return tensor, new_width
+        processed = []
+        for img in images:
+            try:
+                processed.append(_process_pil_image(img))
+            except Exception as e:
+                if debug:
+                    print(f"Skipping invalid image: {e}")
+                processed.append(torch.full((3, self.target_height, self.patch_size_w), PAD_WHITE, dtype=torch.uint8))
 
-        all_predictions = []
+        # Lines of similar width share a batch, as in training, so little padding sits beside a line.
+        order = sorted(range(len(processed)), key=lambda i: processed[i].shape[2])
+        predictions = [''] * len(processed)
 
         with torch.no_grad():
-            for start_idx in range(0, len(images), batch_size):
-                batch_images_pil = images[start_idx:start_idx + batch_size]
+            for start_idx in range(0, len(order), batch_size):
+                chunk = order[start_idx:start_idx + batch_size]
+                batch_tensor, attn_masks, in_lens = collate.pad([processed[i] for i in chunk])
+                batch_tensor = batch_tensor.to(device)
+                attn_masks = attn_masks.to(device)
+                in_lens = in_lens.to(device)
 
-                processed_tensors = []
-                widths = []
-
-                for img in batch_images_pil:
-                    try:
-                        tensor, w = _process_pil_image(img)
-                        processed_tensors.append(tensor)
-                        widths.append(w)
-                    except Exception as e:
-                        if debug:
-                            print(f"Skipping invalid image: {e}")
-                        # Fallback for failed images to keep batch alignment
-                        dummy = torch.ones(3, self.target_height, self.patch_size) * fill_value
-                        processed_tensors.append(dummy)
-                        widths.append(self.patch_size)
-
-                per_sample_target_W = [math.ceil(w / self.patch_size) * self.patch_size for w in widths]
-                batch_target_W = max(per_sample_target_W)
-
-                num_patches_h = self.target_height // self.patch_size
-                num_patches_w = batch_target_W // self.patch_size
-
-                padded_images = []
-                attention_masks = []
-                input_lengths = []
-
-                for img_tensor, w, targ_w in zip(processed_tensors, widths, per_sample_target_W):
-                    pad_to_batch = batch_target_W - w
-                    if pad_to_batch > 0:
-                        img_tensor = F.pad(img_tensor, (0, pad_to_batch, 0, 0), mode="constant", value=fill_value)
-                    padded_images.append(img_tensor)
-
-                    real_w_patches = targ_w // self.patch_size
-
-                    if self.use_2d_structure:
-                        mask_grid = torch.ones(num_patches_w, num_patches_h, dtype=torch.bool)
-                        mask_grid[:real_w_patches, :] = False
-                        mask = mask_grid.reshape(-1)
-                        input_lengths.append(real_w_patches * num_patches_h)
-                    else:
-                        mask = torch.ones(num_patches_w, dtype=torch.bool)
-                        mask[:real_w_patches] = False
-                        input_lengths.append(real_w_patches)
-
-                    attention_masks.append(mask)
-
-                batch_tensor = torch.stack(padded_images).to(device)
-                attn_masks = torch.stack(attention_masks).to(device)
-                in_lens = torch.as_tensor(input_lengths, dtype=torch.long, device=device)
-
-                decoder_ids = None
-                log_probs = None
                 try:
                     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                         memory, memory_key_padding_mask, _, _ = self._encode(
                             batch_tensor, attention_masks=attn_masks
                         )
                         if use_decoder:
-                            decoder_ids = self.decode_autoregressive(
+                            texts = self._decoder_ids_to_text(self.decode_autoregressive(
                                 memory, memory_key_padding_mask, max_len=decoder_max_len
-                            )
+                            ))
                         else:
-                            logits = self.output_layer(memory)
-                            log_probs = nn.functional.log_softmax(logits, dim=2)
+                            log_probs = nn.functional.log_softmax(self.output_layer(memory), dim=2)
                 except Exception as e:
                     if debug:
                         print(f"Forward pass error: {e}")
-                    all_predictions.extend([''] * len(batch_images_pil))
                     continue
 
-                if use_decoder:
-                    all_predictions.extend(self._decoder_ids_to_text(decoder_ids))
-                    continue
+                if not use_decoder:
+                    texts = None
+                    if use_beam_search:
+                        try:
+                            texts = self.tokenizer.batch_decode_beam_search(
+                                log_probs,
+                                in_lens,
+                                beam_width=beam_width,
+                                blank_penalty=blank_penalty,
+                                length_penalty=length_penalty
+                            )
+                        except Exception as e:
+                            if debug:
+                                print(f"Beam search error, falling back to greedy: {e}")
+                    if texts is None:
+                        pred_tokens = log_probs.argmax(dim=2).permute(1, 0).cpu()
+                        texts = [self.tokenizer.ctc_decode(pred_tokens[i, :in_lens[i].item()].tolist(),
+                                                           skip_special_tokens=True)
+                                 for i in range(len(chunk))]
 
-                if use_beam_search:
-                    try:
-                        beam_preds_batch = self.tokenizer.batch_decode_beam_search(
-                            log_probs,
-                            in_lens,
-                            beam_width=beam_width,
-                            blank_penalty=blank_penalty,
-                            length_penalty=length_penalty
-                        )
-                        all_predictions.extend(beam_preds_batch)
-                    except Exception as e:
-                        if debug:
-                            print(f"Beam search error, falling back to greedy: {e}")
-                        use_beam_search = False
+                for index, text in zip(chunk, texts):
+                    predictions[index] = text
 
-                if not use_beam_search:
-                    pred_tokens = log_probs.argmax(dim=2).permute(1, 0).cpu()
-                    for i in range(len(batch_images_pil)):
-                        T_i = in_lens[i].item()
-                        pred_text = self.tokenizer.ctc_decode(pred_tokens[i, :T_i].tolist(), skip_special_tokens=True)
-                        all_predictions.append(pred_text)
-
-        return all_predictions
+        return predictions
 
     def _log_attention_visualization(
         self,

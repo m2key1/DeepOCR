@@ -21,6 +21,9 @@ from tqdm import tqdm
 from utils.conventions import ConventionTable
 from utils.tokenizer import DeepTokenizer, canonicalize
 
+# Batches travel as raw bytes and the model normalizes them, so padding is plain white.
+PAD_WHITE = 255
+
 
 def worker_init(worker_id: int) -> None:
     # OpenCV's per-process thread pool multiplies across ranks x workers, and the augmentation work
@@ -538,6 +541,23 @@ class WidthBucketedBatchSampler(Sampler[list[int]]):
             yield batches[i]
 
 
+class WidthSortedValidationSampler(Sampler[list[int]]):
+    """Validation batches of neighbouring widths, so a line is read with as little padding as in
+    training and in production, and CER does not depend on the batch size. Every line is read
+    exactly once: ranks take every num_replicas-th batch and may end up one batch apart."""
+
+    def __init__(self, widths: list[int], batch_size: int, num_replicas: int = 1, rank: int = 0):
+        order = torch.argsort(torch.tensor(widths, dtype=torch.long), stable=True).tolist()
+        batches = [order[start:start + batch_size] for start in range(0, len(order), batch_size)]
+        self.batches = batches[rank::num_replicas]
+
+    def __len__(self) -> int:
+        return len(self.batches)
+
+    def __iter__(self) -> Iterator[list[int]]:
+        return iter(self.batches)
+
+
 class Collate:
     """Pads a batch to a common size and builds the CTC length and mask tensors.
 
@@ -565,12 +585,9 @@ class Collate:
         self.fixed_width = fixed_width
         self.collapse_height = collapse_height
 
-    def __call__(self, batch):
-        batch = [b for b in batch if b is not None]
-        if not batch:
-            return None
-
-        images, targets, dataset_labels, flags = zip(*batch)
+    def pad(self, images):
+        """Pads uint8 or float line images to one batch; returns the batch, the padding mask and
+        the CTC input lengths. Inference uses this too, so it pads exactly as training does."""
         B = len(images)
         C = images[0].shape[0]
 
@@ -578,7 +595,7 @@ class Collate:
         if len(heights) > 1:
             raise ValueError(f"Images in batch have inconsistent heights: {heights}")
         H = next(iter(heights))
-        
+
         if self.pad_height_to_multiple and (H % self.patch_size != 0):
             H_pad = math.ceil(H / self.patch_size) * self.patch_size - H
             images = [F.pad(img, (0, 0, 0, H_pad), mode="constant", value=self.fill_value) for img in images]
@@ -597,12 +614,12 @@ class Collate:
         num_patches_w = batch_target_W // self.patch_size_w
 
         batched_images = torch.full((B, C, H, batch_target_W), self.fill_value, dtype=images[0].dtype)
-        
+
         if self.use_2d_structure:
             batched_masks = torch.ones((B, num_patches_w * num_patches_h), dtype=torch.bool)
         else:
             batched_masks = torch.ones((B, num_patches_w), dtype=torch.bool)
-            
+
         input_lengths = torch.zeros(B, dtype=torch.long)
 
         for i, (img, w) in enumerate(zip(images, widths)):
@@ -618,6 +635,16 @@ class Collate:
             else:
                 batched_masks[i, :real_w_patches] = False
                 input_lengths[i] = real_w_patches
+
+        return batched_images, batched_masks, input_lengths
+
+    def __call__(self, batch):
+        batch = [b for b in batch if b is not None]
+        if not batch:
+            return None
+
+        images, targets, dataset_labels, flags = zip(*batch)
+        batched_images, batched_masks, input_lengths = self.pad(images)
 
         target_lengths = torch.tensor([len(t) for t in targets], dtype=torch.long)
         targets_concat = torch.cat([torch.as_tensor(t, dtype=torch.long) for t in targets], dim=0)

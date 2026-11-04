@@ -15,11 +15,11 @@ from albumentations.pytorch import ToTensorV2
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 
 from utils.augmentations import BaselineCurve, Binarize, NeighbourLineBleed, VerticalCropPad
 from utils.conventions import ConventionTable, hold_trained_flags_to_rate
-from utils.dataset import OCRDataset, WidthBucketedBatchSampler, make_collate_fn, worker_init
+from utils.dataset import (PAD_WHITE, OCRDataset, WidthBucketedBatchSampler, WidthSortedValidationSampler,
+                           make_collate_fn, worker_init)
 from utils.loss import CTCLossWithSmoothing
 from utils.model import DeepOCR
 from utils.token_decoder import TokenDecoder
@@ -157,8 +157,6 @@ LM_WEIGHT = 1.0 # swept optimum for this LM; re-sweep when the LM or vocab chang
 
 CACHE_TO_RAM = False
 EXCLUDE_DATA = []
-# Batches travel as raw bytes and the model normalizes them, so padding is plain white.
-PAD_WHITE = 255
 INCLUDE_DATA = []
 # Per rank. Each spawn worker holds a copy of the dataset, so host RAM scales with GPUs x workers x
 # prefetch.
@@ -610,15 +608,18 @@ def main():
         worker_init_fn=worker_init,
     )
 
-    valid_sampler = DistributedSampler(valid_dataset, shuffle=False) if is_distributed else None
+    valid_batch_sampler = WidthSortedValidationSampler(
+        valid_dataset.sample_widths,
+        batch_size=BATCH_SIZE,
+        num_replicas=world_size,
+        rank=dist.get_rank() if is_distributed else 0,
+    )
 
     # Respawning workers dominates a validation pass; they are alive during validation anyway, so
     # persisting them adds nothing to peak host memory.
     valid_dataloader = DataLoader(
         valid_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        sampler=valid_sampler,
+        batch_sampler=valid_batch_sampler,
         collate_fn=collate,
         num_workers=VALID_NUM_WORKERS,
         pin_memory=PIN_MEMORY,
