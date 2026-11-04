@@ -29,13 +29,17 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from utils.backbones import build_backbone
 from utils.conventions import remap_convention_columns
-from utils.tokenizer import DeepTokenizer
+from utils.token_decoder import END_TOKEN_ID as TOKEN_DECODER_END_ID, PAD_TOKEN_ID as TOKEN_DECODER_PAD_ID, TokenDecoder
+from utils.tokenizer import DeepTokenizer, canonicalize
 
 matplotlib.use('Agg')
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+# The token decoder may write this much more text than the CTC head reads, plus a margin in bytes.
+DECODER_BYTE_SLACK = 1.3
+DECODER_BYTE_MARGIN = 8
 
 
 def to_display_image(images: torch.Tensor) -> torch.Tensor:
@@ -604,6 +608,10 @@ class DeepOCR(nn.Module):
         decoder_label_smoothing: float = 0.1,
         decoder_eos_weight: float = 1.0,
         decoder_lm_path: Optional[Path] = None,
+        decoder_type: str = 'char',
+        token_decoder_lm_path: Optional[Path] = None,
+        token_decoder_config: Optional[dict] = None,
+        token_decoder_tokenizer: Optional[str] = None,
     ):
         super(DeepOCR, self).__init__()
         self.tokenizer = tokenizer
@@ -611,6 +619,7 @@ class DeepOCR(nn.Module):
         self.target_height = target_height
         self.max_width = max_width
         self.freeze_backbone = freeze_backbone
+        self.encoder_frozen = False
         self.use_2d_structure = use_2d_structure
         self.num_experts = num_experts
         self.top_k_experts = top_k_experts
@@ -715,13 +724,26 @@ class DeepOCR(nn.Module):
         self.ctc_loss_weight = ctc_loss_weight
         self.decoder_loss_weight = decoder_loss_weight
         self.decoder_label_smoothing = decoder_label_smoothing
+        self.decoder_input_noise = 0.0
         self.decoder_layers = decoder_layers
         self.decoder_heads = decoder_heads
         self.decoder_dim_feedforward = decoder_dim_feedforward
         self.decoder_dropout = decoder_dropout
         self.decoder_embed_scale = math.sqrt(self.d_model)
 
-        if self.use_decoder:
+        self.decoder_type = decoder_type
+        self.decoder_pad_id = self.tokenizer.pad_token_id
+        if self.use_decoder and decoder_type == 'token':
+            # a subword LM decoder: its own vocabulary and text form, reading the encoder via cross-attention
+            if token_decoder_lm_path is not None:
+                self.decoder = TokenDecoder.from_pretrained_lm(Path(token_decoder_lm_path), self.d_model)
+            else:
+                self.decoder = TokenDecoder(token_decoder_config, token_decoder_tokenizer, self.d_model)
+            self.decoder_pad_id = TOKEN_DECODER_PAD_ID
+            ce_class_weight = torch.ones(self.decoder.vocab_size)
+            ce_class_weight[TOKEN_DECODER_END_ID] = decoder_eos_weight
+            self.register_buffer('decoder_ce_weight', ce_class_weight)
+        elif self.use_decoder:
             self.decoder_embed = nn.Embedding(
                 self.num_classes, self.d_model, padding_idx=self.tokenizer.pad_token_id
             )
@@ -746,11 +768,28 @@ class DeepOCR(nn.Module):
 
         # LM warm-start first, so a checkpoint's own decoder overrides it; a checkpoint without a
         # decoder leaves the warm-start intact because the weights load with strict=False
-        if self.use_decoder and decoder_lm_path is not None:
+        if self.use_decoder and decoder_type == 'char' and decoder_lm_path is not None:
             self._load_pretrained_decoder_lm(Path(decoder_lm_path))
 
         if self.weight_path is not None:
             self._load_pretrained_weights()
+
+    def freeze_encoder(self):
+        """Leaves only the decoder trainable. The rest stays in eval mode, so the decoder learns from the
+        features it reads at inference and the router biases stop moving."""
+        self.encoder_frozen = True
+        for name, param in self.named_parameters():
+            if not name.startswith('decoder'):
+                param.requires_grad = False
+        self.train(self.training)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if getattr(self, 'encoder_frozen', False):
+            for name, child in self.named_children():
+                if not name.startswith('decoder'):
+                    child.train(False)
+        return self
 
     def _update_router_biases(self):
         for layer in self.transformer_layers:
@@ -863,11 +902,12 @@ class DeepOCR(nn.Module):
         if getattr(self, 'use_span_mask', False):
             generated_mask = None
 
-            if self.training or return_attention:
+            masking = self.training and not self.encoder_frozen
+            if masking or return_attention:
                 generated_mask = self._generate_span_mask(B, seq_len, projected_sequence.device)
                 active_span_mask = generated_mask
 
-            if self.training and generated_mask is not None:
+            if masking and generated_mask is not None:
                 x_t = projected_sequence.transpose(0, 1)
                 mask_token_expanded = self.mask_token.expand(B, seq_len, self.d_model)
                 x_masked = torch.where(generated_mask.unsqueeze(-1), mask_token_expanded, x_t)
@@ -927,8 +967,9 @@ class DeepOCR(nn.Module):
                 conventions: Optional[torch.Tensor] = None
                 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor], Optional[torch.Tensor]]:
 
-        memory, memory_key_padding_mask, aux_losses, enc_state = self._encode(
-            x, attention_masks, return_attention, conventions)
+        with torch.no_grad() if self.encoder_frozen else nullcontext():
+            memory, memory_key_padding_mask, aux_losses, enc_state = self._encode(
+                x, attention_masks, return_attention, conventions)
 
         B = enc_state['B']
         grid_width = enc_state['grid_width']
@@ -995,7 +1036,7 @@ class DeepOCR(nn.Module):
                 viz_outputs['confidence_margin_map'] = logit_seq_to_grid(confidence_margin)
 
             # in eval the mask is generated but never applied, so plotting it would mislead
-            if active_span_mask is not None and self.training:
+            if active_span_mask is not None and self.training and not self.encoder_frozen:
                 viz_outputs['span_mask'] = seq_to_grid(active_span_mask.float())
 
             for i, assignment in enumerate(expert_assignments):
@@ -1015,6 +1056,12 @@ class DeepOCR(nn.Module):
         """Splits the CTC-style concatenated targets into padded decoder input/target tensors.
         decoder_input is BOS-prefixed; decoder_target is EOS-suffixed; both are padded with pad_id."""
         sequences = torch.split(targets_concat, target_lengths.tolist())
+        if self.decoder_type == 'token':
+            texts = self.tokenizer.batch_decode(sequences, skip_special_tokens=True)
+            inputs, targets, padding = self.decoder.build_io(texts, targets_concat.device)
+            if self.training and self.decoder_input_noise > 0:
+                inputs = self.decoder.corrupt_inputs(inputs, padding, self.decoder_input_noise)
+            return inputs, targets, padding
         bos_id = self.tokenizer.bos_token_id
         eos_id = self.tokenizer.eos_token_id
         pad_id = self.tokenizer.pad_token_id
@@ -1044,6 +1091,8 @@ class DeepOCR(nn.Module):
         decoder_input: torch.Tensor,
         tgt_key_padding_mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
+        if self.decoder_type == 'token':
+            return self.decoder(memory, memory_key_padding_mask, decoder_input).transpose(0, 1)
         seq_len = decoder_input.size(1)
         embedded = self.decoder_embed(decoder_input) * self.decoder_embed_scale
         embedded = self.decoder_pos(embedded.transpose(0, 1))
@@ -1060,6 +1109,18 @@ class DeepOCR(nn.Module):
         return self.decoder_output(decoded)
 
     @torch.no_grad()
+    def _decoder_byte_budget(self, memory: torch.Tensor,
+                             memory_key_padding_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """How much text the decoder may write per line: what the CTC head reads off the image, with
+        room for the head's own misses. A decoder that loops runs into it; one that reads does not."""
+        best_path = self.output_layer(memory).argmax(dim=-1).transpose(0, 1)
+        if memory_key_padding_mask is not None:
+            best_path = best_path.masked_fill(memory_key_padding_mask, self.tokenizer.blank_token_id)
+        repeats = torch.zeros_like(best_path, dtype=torch.bool)
+        repeats[:, 1:] = best_path[:, 1:] == best_path[:, :-1]
+        ctc_bytes = ((best_path != self.tokenizer.blank_token_id) & ~repeats).sum(dim=1)
+        return (ctc_bytes.float() * DECODER_BYTE_SLACK).ceil().long() + DECODER_BYTE_MARGIN
+
     def decode_autoregressive(
         self,
         memory: torch.Tensor,
@@ -1067,6 +1128,9 @@ class DeepOCR(nn.Module):
         max_len: int = 256
     ) -> torch.Tensor:
         """Greedy autoregressive decode. Returns generated token ids [B, T] including the leading BOS."""
+        if self.decoder_type == 'token':
+            return self.decoder.generate(memory, memory_key_padding_mask, max_len,
+                                         max_bytes=self._decoder_byte_budget(memory, memory_key_padding_mask))
         batch_size = memory.size(1)
         device = memory.device
         bos_id = self.tokenizer.bos_token_id
@@ -1125,14 +1189,16 @@ class DeepOCR(nn.Module):
         if not flat_texts:
             return ["" for _ in nbest_lists]
 
-        encoded = [self.tokenizer.encode(text) for text in flat_texts]
-        target_lengths = torch.tensor([len(seq) for seq in encoded], dtype=torch.long, device=device)
-        targets_concat = torch.cat([
-            torch.tensor(seq, dtype=torch.long, device=device) if seq else torch.empty(0, dtype=torch.long, device=device)
-            for seq in encoded
-        ])
-
-        decoder_input, decoder_target, tgt_key_padding_mask = self._build_decoder_io(targets_concat, target_lengths)
+        if self.decoder_type == 'token':
+            decoder_input, decoder_target, tgt_key_padding_mask = self.decoder.build_io(flat_texts, device)
+        else:
+            encoded = [self.tokenizer.encode(text) for text in flat_texts]
+            target_lengths = torch.tensor([len(seq) for seq in encoded], dtype=torch.long, device=device)
+            targets_concat = torch.cat([
+                torch.tensor(seq, dtype=torch.long, device=device) if seq else torch.empty(0, dtype=torch.long, device=device)
+                for seq in encoded
+            ])
+            decoder_input, decoder_target, tgt_key_padding_mask = self._build_decoder_io(targets_concat, target_lengths)
 
         sample_idx_tensor = torch.tensor(flat_sample_idx, dtype=torch.long, device=device)
         memory_rep = memory[:, sample_idx_tensor, :]
@@ -1146,7 +1212,10 @@ class DeepOCR(nn.Module):
         decoder_scores = (token_log_probs * valid_positions).sum(dim=1)
 
         ctc_scores = torch.tensor(flat_ctc_scores, dtype=torch.float32, device=device)
-        combined = ctc_scores + alpha * decoder_scores + beta * target_lengths.float()
+        # length in byte tokens whichever decoder scores, so beta means the same for both
+        text_lengths = torch.tensor([len(self.tokenizer.encode(text)) for text in flat_texts],
+                                    dtype=torch.float32, device=device)
+        combined = ctc_scores + alpha * decoder_scores + beta * text_lengths
 
         best_texts = ["" for _ in nbest_lists]
         best_scores = [float('-inf')] * len(nbest_lists)
@@ -1158,6 +1227,8 @@ class DeepOCR(nn.Module):
         return best_texts
 
     def _decoder_ids_to_text(self, generated: torch.Tensor) -> List[str]:
+        if self.decoder_type == 'token':
+            return [canonicalize(text) for text in self.decoder.ids_to_text(generated)]
         bos_id = self.tokenizer.bos_token_id
         eos_id = self.tokenizer.eos_token_id
         texts = []
@@ -1188,6 +1259,13 @@ class DeepOCR(nn.Module):
                     pretrained_state.pop(key)
                 print(f"Pretrained backbone is '{pretrained_backbone}', this model uses "
                       f"'{self.backbone_name}'; backbone weights skipped, the rest loads.")
+
+            pretrained_decoder_type = checkpoint.get('decoder_type', 'char')
+            if pretrained_decoder_type != self.decoder_type:
+                for key in [k for k in pretrained_state if k.startswith('decoder')]:
+                    pretrained_state.pop(key)
+                print(f"Pretrained decoder is '{pretrained_decoder_type}', this model uses "
+                      f"'{self.decoder_type}'; decoder weights skipped, the rest loads.")
 
             for old_key in [k for k in pretrained_state if k.startswith('backbone.')]:
                 if old_key in model_state:
@@ -1537,7 +1615,7 @@ class DeepOCR(nn.Module):
                             decoder_logits.to(torch.float32).permute(1, 0, 2).reshape(-1, vocab_size),
                             decoder_target.reshape(-1),
                             weight=ce_weight.to(torch.float32) if ce_weight is not None else None,
-                            ignore_index=self.tokenizer.pad_token_id,
+                            ignore_index=self.decoder_pad_id,
                             label_smoothing=self.decoder_label_smoothing
                         )
                         loss = loss + (current_decoder_weight * ce_loss)
@@ -2483,8 +2561,12 @@ class DeepOCR(nn.Module):
             'decoder_heads': self.decoder_heads,
             'decoder_dim_feedforward': self.decoder_dim_feedforward,
             'decoder_dropout': self.decoder_dropout,
+            'decoder_type': self.decoder_type,
             'model_state_dict': self.state_dict()
         }
+        if self.use_decoder and self.decoder_type == 'token':
+            payload['token_decoder_config'] = self.decoder.config
+            payload['token_decoder_tokenizer'] = self.decoder.tokenizer_json
         if extra_state:
             payload.update(extra_state)
         torch.save(payload, file_path)
@@ -2581,6 +2663,9 @@ class DeepOCR(nn.Module):
             decoder_heads=checkpoint.get('decoder_heads', 8),
             decoder_dim_feedforward=checkpoint.get('decoder_dim_feedforward', 2048),
             decoder_dropout=checkpoint.get('decoder_dropout', 0.1),
+            decoder_type=checkpoint.get('decoder_type', 'char'),
+            token_decoder_config=checkpoint.get('token_decoder_config'),
+            token_decoder_tokenizer=checkpoint.get('token_decoder_tokenizer'),
         )
 
         model_keys = set(model.state_dict().keys())

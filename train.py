@@ -20,6 +20,7 @@ from utils.conventions import ConventionTable, hold_trained_flags_to_rate
 from utils.dataset import OCRDataset, WidthBucketedBatchSampler, make_collate_fn, worker_init
 from utils.loss import CTCLossWithSmoothing
 from utils.model import DeepOCR
+from utils.token_decoder import TokenDecoder
 from utils.tokenizer import DeepTokenizer, check_kenlm_artifacts
 
 try:
@@ -108,6 +109,17 @@ DECODER_MAX_LEN = 256
 DECODER_VAL_FREQUENCY = 1
 DECODER_WARMUP_EPOCHS = 0
 PRETRAINED_DECODER_LM = Path('runs/decoder_lm_bytes.pt')
+# 'char' predicts the CTC vocabulary; 'token' is a pretrained subword LM (an OLMo 3 checkpoint directory
+# with tokenizer.json) that reads the encoder through new cross-attention layers.
+DECODER_TYPE = 'char'
+TOKEN_DECODER_LM = None
+# The cross-attention starts from scratch inside a pretrained LM, so it learns faster than the LM it reads into.
+TOKEN_DECODER_NEW_LR = 3e-4
+# Share of teacher-forced input tokens swapped for random ones, so the decoder reads the image
+# instead of continuing the text.
+TOKEN_DECODER_INPUT_NOISE = 0.1
+# Trains the decoder alone; the CTC head and the encoder it reads stay exactly as warm-started.
+FREEZE_ENCODER = False
 SAVE_BEST_OF_HEADS = False
 SELECT_ON_DECODER = False
 
@@ -148,6 +160,8 @@ INCLUDE_DATA = []
 # Per rank. Each spawn worker holds a copy of the dataset, so host RAM scales with GPUs x workers x
 # prefetch.
 NUM_WORKERS = int(os.environ.get('OCR_NUM_WORKERS', 8))
+# Persistent validation workers sit beside the training ones, each with its own queue of batches.
+VALID_NUM_WORKERS = int(os.environ.get('OCR_VALID_NUM_WORKERS', NUM_WORKERS))
 # Decoding the full valid split every epoch takes hours; a seeded subset gives a stable CER.
 VALID_LIMIT = int(os.environ.get('OCR_VALID_LIMIT', 25000))
 # Per-step curves dominate the event file, so batch-level scalars are sampled. Epoch-level metrics
@@ -194,6 +208,8 @@ if os.environ.get('TRAIN_SNAPSHOT'):
         LABEL_OVERRIDES = json.loads(_manifest.read_text(encoding='utf-8'))
 if 'TRAIN_BASE_CHECKPOINT' in os.environ:
     PRETRAIN_WEIGHTS = Path(os.environ['TRAIN_BASE_CHECKPOINT']) if os.environ['TRAIN_BASE_CHECKPOINT'] else None
+if os.environ.get('TRAIN_TOKEN_DECODER_LM'):
+    TOKEN_DECODER_LM = Path(os.environ['TRAIN_TOKEN_DECODER_LM'])
 if os.environ.get('TRAIN_BATCH'):
     BATCH_SIZE = int(os.environ['TRAIN_BATCH'])
 if os.environ.get('TRAIN_LR'):
@@ -215,6 +231,7 @@ APP_TUNABLES = (
     'SELECT_ON_DECODER', 'SAVE_BEST_OF_HEADS',
     'FREEZE_BACKBONE', 'RESET_EXPERTS', 'RESET_MOE_ROUTER', 'WARMUP_ROUTER_EPOCHS',
     'DECODER_WARMUP_EPOCHS', 'SAMPLER_SEED', 'NUM_WORKERS', 'CONVENTION_LR',
+    'DECODER_TYPE', 'TOKEN_DECODER_NEW_LR', 'TOKEN_DECODER_INPUT_NOISE', 'FREEZE_ENCODER',
 )
 
 
@@ -538,8 +555,15 @@ def main():
         decoder_loss_weight=DECODER_LOSS_WEIGHT,
         decoder_label_smoothing=DECODER_LABEL_SMOOTHING,
         decoder_eos_weight=DECODER_EOS_WEIGHT,
-        decoder_lm_path=PRETRAINED_DECODER_LM
+        decoder_lm_path=PRETRAINED_DECODER_LM,
+        decoder_type=DECODER_TYPE,
+        token_decoder_lm_path=TOKEN_DECODER_LM,
     ).to(device)
+
+    if FREEZE_ENCODER:
+        model.freeze_encoder()
+    if DECODER_TYPE == 'token':
+        model.decoder_input_noise = TOKEN_DECODER_INPUT_NOISE
 
     if is_distributed:
         model = cast(DeepOCR, torch.nn.SyncBatchNorm.convert_sync_batchnorm(model))
@@ -599,19 +623,22 @@ def main():
         shuffle=False,
         sampler=valid_sampler,
         collate_fn=collate,
-        num_workers=NUM_WORKERS,
+        num_workers=VALID_NUM_WORKERS,
         pin_memory=PIN_MEMORY,
-        persistent_workers=True if NUM_WORKERS > 0 else False,
-        multiprocessing_context='spawn' if NUM_WORKERS > 0 else None,
+        persistent_workers=True if VALID_NUM_WORKERS > 0 else False,
+        multiprocessing_context='spawn' if VALID_NUM_WORKERS > 0 else None,
         worker_init_fn=worker_init,
     )
 
     backbone_params, decoder_params, transformer_params, convention_params = [], [], [], []
+    new_decoder_params = []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         if name.startswith('backbone.'):
             backbone_params.append(param)
+        elif name.startswith('decoder.') and DECODER_TYPE == 'token' and TokenDecoder.is_new_parameter(name):
+            new_decoder_params.append(param)
         elif name.startswith('decoder'):
             decoder_params.append(param)
         elif name.startswith('convention_proj.'):
@@ -636,6 +663,15 @@ def main():
         })
         if is_master:
             print(f"Decoder param group: {len(decoder_params)} tensors at LR {dynamic_decoder_lr:.6f}")
+    if new_decoder_params:
+        param_groups.append({
+            'params': new_decoder_params,
+            'lr': TOKEN_DECODER_NEW_LR,
+            'weight_decay': WEIGHT_DECAY
+        })
+        if is_master:
+            print(f"Decoder cross-attention group: {len(new_decoder_params)} tensors at LR {TOKEN_DECODER_NEW_LR:.6f}")
+    # the convention group must stay last: hold_trained_flags_to_rate reads it as param_groups[-1]
     if convention_params:
         param_groups.append({
             'params': convention_params,
