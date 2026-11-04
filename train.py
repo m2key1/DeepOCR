@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import cast
 
 import albumentations as A
+import cv2
 import torch
 import torch.distributed as dist
 from albumentations.pytorch import ToTensorV2
@@ -16,6 +17,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from utils.augmentations import BaselineCurve, Binarize, NeighbourLineBleed, VerticalCropPad
 from utils.conventions import ConventionTable, hold_trained_flags_to_rate
 from utils.dataset import OCRDataset, WidthBucketedBatchSampler, make_collate_fn, worker_init
 from utils.loss import CTCLossWithSmoothing
@@ -305,6 +307,8 @@ def _respelled(node):
 # track it to keep the same strength relative to the stroke width. The pixel values below are for
 # 128 px. Fractional transforms (noise, dropout, shadow, spatter, affine) need no scaling.
 _AUG_PIXEL_SCALE = TARGET_HEIGHT / 128
+AUGMENT_PROB = 0.85
+AUGMENT_OPS_PER_LINE = 4
 
 
 def _scaled(low: float, high: float) -> tuple[int, int]:
@@ -320,45 +324,39 @@ def get_transforms() -> tuple[A.Compose, A.Compose]:
         steps = list(A.from_dict(_respelled(spec)))
         return A.Compose([*steps, ToTensorV2()]), val_transform
 
-    train_transform = A.Compose([
-        A.Affine(
-            scale=(0.95, 1.05),
-            translate_percent={
-                'x': (-0.02, 0.02),
-                'y': (-0.02, 0.02)
-            },
-            rotate=(-2, 2),
-            shear={
-                'x': (-2, 2),
-                'y': (2, -2)
-            },
-            p=0.3,
-            fill=255
-        ),
-        A.Affine(
-            scale={'x': (0.7, 1.0), 'y': (1.0, 1.0)},
-            keep_ratio=False,
-            p=0.3,
-            fill=255
-        ),
+    # Each line draws AUGMENT_OPS_PER_LINE operations at random, in random order, and each drawn one
+    # still runs only with its own p, so an augmented line sees two or three of them on average.
+    operations = [
+        A.GridDistortion(num_steps=8, distort_limit=(-0.3, 0.3), border_mode=cv2.BORDER_REPLICATE, p=0.9),
         # Models slant and baseline drift; a much larger alpha destroys the line.
-        A.ElasticTransform(alpha=40 * _AUG_PIXEL_SCALE, sigma=50 * _AUG_PIXEL_SCALE,
-                           approximate=True, p=0.2),
-        # The default roi puts every shadow on the bottom half.
-        A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=0.3),
-        A.GaussNoise(p=0.3),
-        A.GaussianBlur(sigma_limit=(0.5 * _AUG_PIXEL_SCALE, 3.0 * _AUG_PIXEL_SCALE), blur_limit=0, p=0.3),
+        A.ElasticTransform(alpha=40 * _AUG_PIXEL_SCALE, sigma=50 * _AUG_PIXEL_SCALE, approximate=True, p=0.5),
+        A.Affine(scale=(0.95, 1.05), translate_percent={'x': (-0.02, 0.02), 'y': (-0.02, 0.02)},
+                 rotate=(-2, 2), shear={'x': (-8, 8), 'y': (-2, 2)}, fill=255, p=0.9),
+        A.Affine(scale={'x': (0.7, 1.0), 'y': (1.0, 1.0)}, keep_ratio=False, fill=255, p=0.7),
+        BaselineCurve(p=0.6),
+        VerticalCropPad(p=0.8),
+        NeighbourLineBleed(p=0.6),
+        A.Downscale(scale_range=(0.35, 0.8), p=0.6),
+        A.ImageCompression(quality_range=(30, 90), p=0.6),
+        # Greyscale input trains better than binarised input, so only a few lines are thresholded.
+        Binarize(p=0.15),
+        # Strong blur erases the nick that tells long s from f.
+        A.GaussianBlur(sigma_limit=(0.5 * _AUG_PIXEL_SCALE, 1.0 * _AUG_PIXEL_SCALE), blur_limit=0, p=0.5),
         # Dilation erases strokes past the stroke width; erosion only fattens the pen.
         A.OneOf([
-            A.Morphological(operation='erosion', scale=_scaled(2, 6), p=1.0),
-            A.Morphological(operation='dilation', scale=_scaled(2, 4), p=1.0)
-        ],
-                p=0.3),
+            A.Morphological(operation='erosion', scale=_scaled(1, 1.5), p=1.0),
+            A.Morphological(operation='dilation', scale=_scaled(1, 1.5), p=1.0)
+        ], p=0.5),
+        # The default strength buries thin Fraktur strokes; this range matches scan grain.
+        A.GaussNoise(std_range=(0.02, 0.12), p=0.7),
         # Lines are greyscale, so colour-channel ops would do nothing.
-        _brightness_contrast(p=0.3),
-        A.PixelDropout(dropout_prob=0.05, per_channel=True, p=0.3),
-        A.CoarseDropout(num_holes_range=(1, 5), hole_height_range=(0.05, 0.15), hole_width_range=(0.02, 0.08), fill=0, p=0.3),
-        A.Spatter(mode='mud', color=(0, 0, 0), p=0.2),
+        _brightness_contrast(p=0.8),
+        # The default roi puts every shadow on the bottom half.
+        A.RandomShadow(shadow_roi=(0, 0, 1, 1), num_shadows_limit=(1, 1), shadow_intensity_range=(0.1, 0.3), p=0.3),
+        A.Spatter(mode='mud', color=(0, 0, 0), p=0.4),
+    ]
+    train_transform = A.Compose([
+        A.RandomOrder(operations, n=AUGMENT_OPS_PER_LINE, p=AUGMENT_PROB),
         ToTensorV2()
     ])
     return train_transform, val_transform
