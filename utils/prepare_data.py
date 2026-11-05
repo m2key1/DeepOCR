@@ -6,6 +6,7 @@ import random
 import re
 import shutil
 import sys
+import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -30,6 +31,8 @@ NUMBERED_LINE = re.compile(r'^\d+$')
 # GT4HistOCR numbers lines per book with no page id; consecutive blocks stand in for pages
 LINES_PER_NUMBERED_PAGE = 30
 IMAGE_LINK_MODE = 'hardlink'    # 'hardlink' | 'symlink' | 'copy'
+MIN_OVERLAP_LENGTH = 12
+OVERLAP_FOLD = str.maketrans({'ſ': 's', '⸗': '-', '=': '-', '¬': '-', '—': '-', '–': '-'})
 
 
 def _place_image(src: Path, dst: Path, mode: str):
@@ -804,12 +807,7 @@ def copy_file_with_rename(args) -> tuple[bool, str | None]:
     try:
         new_txt_path = dest_dir / f"{unique_name}{_text_variant_suffix(text_path)}"
 
-        if text_path.suffix == '.xml':
-            text_lines = extract_xml_textlines(text_path.read_text(encoding='utf-8'))
-            text = text_lines[0]
-        else:
-            text = text_path.read_text(encoding='utf-8')
-        new_txt_path.write_text(canonicalize(text), encoding='utf-8')
+        new_txt_path.write_text(canonicalize(read_pair_text(text_path)), encoding='utf-8')
 
         if place_image:
             new_img_path = dest_dir / f"{unique_name}{image_path.suffix}"
@@ -818,6 +816,47 @@ def copy_file_with_rename(args) -> tuple[bool, str | None]:
     except Exception as e:
         print(f"Error copying {image_path}: {e}")
         return False, None
+
+
+def read_pair_text(text_path: Path) -> str:
+    if text_path.suffix == '.xml':
+        return extract_xml_textlines(text_path.read_text(encoding='utf-8'))[0]
+    return text_path.read_text(encoding='utf-8')
+
+
+def overlap_key(text: str) -> str | None:
+    """Folds the marks corpora transcribe differently, so one line published by two corpora counts
+    as the same text. Short lines such as headings and formulae recur legitimately and are skipped."""
+    folded = ' '.join(canonicalize(text).translate(OVERLAP_FOLD).split())
+    return folded if len(folded) >= MIN_OVERLAP_LENGTH else None
+
+
+def _overlap_keys(text_paths: list[Path]) -> set[str]:
+    with ThreadPoolExecutor() as executor:
+        return set(executor.map(lambda path: overlap_key(read_pair_text(path)), text_paths)) - {None}
+
+
+def _split_dir_keys(split_dir: Path) -> set[str]:
+    if not split_dir.is_dir():
+        return set()
+    return _overlap_keys([path for path in split_dir.iterdir() if path.suffix == '.txt'])
+
+
+def drop_overlapping_pairs(pairs: list[tuple[Path, Path, str]], other_keys: set[str],
+                           side: str) -> list[tuple[Path, Path, str]]:
+    """Drops every text of an image when any of its texts occurs on the other side of the split,
+    so validation never measures a line the model was trained on under another corpus name."""
+    if not pairs or not other_keys:
+        return pairs
+    with ThreadPoolExecutor() as executor:
+        keys = list(executor.map(lambda pair: overlap_key(read_pair_text(pair[1])), pairs))
+    overlapping = {pair[0] for pair, key in zip(pairs, keys) if key in other_keys}
+    if overlapping:
+        counts = Counter(folder for image, _, folder in pairs if image in overlapping)
+        print(f"Dropped {len(overlapping)} {side} images whose text occurs on the other side of the split:")
+        for folder, count in counts.most_common(10):
+            print(f"  {count:7d} {folder}")
+    return [pair for pair in pairs if pair[0] not in overlapping]
 
 
 def split_and_save_pairs(
@@ -866,6 +905,11 @@ def split_and_save_pairs(
         train_pairs, valid_pairs = stratified_split(new_pairs, train_ratio, seed, valid_sources, page_keys)
     else:
         raise ValueError(f"Invalid mode: {mode}")
+
+    if mode == 'extend':
+        valid_pairs = drop_overlapping_pairs(valid_pairs, _split_dir_keys(train_dir), 'validation')
+    valid_keys = _split_dir_keys(valid_dir) | _overlap_keys([pair[1] for pair in valid_pairs])
+    train_pairs = drop_overlapping_pairs(train_pairs, valid_keys, 'training')
 
     train_dir.mkdir(parents=True, exist_ok=True)
     valid_dir.mkdir(parents=True, exist_ok=True)
