@@ -41,6 +41,11 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 # The token decoder may write this much more text than the CTC head reads, plus a margin in bytes.
 DECODER_BYTE_SLACK = 1.3
 DECODER_BYTE_MARGIN = 8
+# Token-decoder beams reranked by decoder log prob + JOINT_CTC_WEIGHT * CTC log likelihood
+# + JOINT_LENGTH_BONUS per character; tuned on held-out validation lines
+DECODER_BEAM = 4
+JOINT_CTC_WEIGHT = 0.3
+JOINT_LENGTH_BONUS = 0.5
 
 
 def normalize_images(images: torch.Tensor) -> torch.Tensor:
@@ -1176,6 +1181,53 @@ class DeepOCR(nn.Module):
                 break
 
         return generated
+
+    def _ctc_log_likelihood(self, log_probs: torch.Tensor, input_lengths: torch.Tensor,
+                            texts: List[str]) -> torch.Tensor:
+        """log P(text | image) under the CTC head for each column of log_probs [S, N, V]; a text the
+        frames cannot hold scores -inf."""
+        targets = [self.tokenizer.encode(text) for text in texts]
+        flat = torch.tensor([token for target in targets for token in target], dtype=torch.long)
+        loss = F.ctc_loss(log_probs.float(), flat.to(log_probs.device), input_lengths.to(log_probs.device),
+                          torch.tensor([len(target) for target in targets], device=log_probs.device),
+                          blank=self.tokenizer.blank_token_id, reduction='none', zero_infinity=False)
+        return -loss
+
+    @torch.no_grad()
+    def decode_joint(self, memory: torch.Tensor, memory_key_padding_mask: Optional[torch.Tensor],
+                     beam: int = DECODER_BEAM, ctc_weight: float = JOINT_CTC_WEIGHT,
+                     length_bonus: float = JOINT_LENGTH_BONUS, max_len: int = 256) -> List[str]:
+        """Token-decoder beam search whose beams are reranked by how well the CTC head reads them off
+        the image."""
+        batch = memory.size(1)
+        sequences, decoder_scores = self.decoder.beam_search(
+            memory, memory_key_padding_mask, max_len, beam,
+            max_bytes=self._decoder_byte_budget(memory, memory_key_padding_mask))
+        texts = self._decoder_ids_to_text(sequences.reshape(batch * beam, -1))
+        log_probs = F.log_softmax(self.output_layer(memory).float(), dim=2)
+        if memory_key_padding_mask is not None:
+            input_lengths = (~memory_key_padding_mask).sum(dim=1)
+        else:
+            input_lengths = torch.full((batch,), memory.size(0), dtype=torch.long, device=memory.device)
+        lines = torch.arange(batch, device=memory.device).repeat_interleave(beam)
+        ctc_scores = self._ctc_log_likelihood(log_probs[:, lines], input_lengths[lines], texts)
+        lengths = torch.tensor([len(text) for text in texts], dtype=torch.float32, device=memory.device)
+        combined = decoder_scores.reshape(-1).float() + length_bonus * lengths
+        if ctc_weight:
+            combined = combined + ctc_weight * ctc_scores
+        combined = combined.reshape(batch, beam)
+        # a line whose every beam the CTC rules out keeps the decoder's own best
+        impossible = ~torch.isfinite(combined.max(dim=1).values)
+        choice = torch.where(impossible, torch.zeros(batch, dtype=torch.long, device=memory.device),
+                             combined.argmax(dim=1))
+        return [texts[row * beam + int(choice[row])] for row in range(batch)]
+
+    def decode_text(self, memory: torch.Tensor, memory_key_padding_mask: Optional[torch.Tensor],
+                    max_len: int = 256) -> List[str]:
+        """The decoder's reading of each line: the joint beam for a token decoder, greedy otherwise."""
+        if self.decoder_type == 'token' and DECODER_BEAM > 1:
+            return self.decode_joint(memory, memory_key_padding_mask, max_len=max_len)
+        return self._decoder_ids_to_text(self.decode_autoregressive(memory, memory_key_padding_mask, max_len=max_len))
 
     @torch.no_grad()
     def rescore_hypotheses(
@@ -2340,9 +2392,7 @@ class DeepOCR(nn.Module):
                             batch_tensor, attention_masks=attn_masks
                         )
                         if use_decoder:
-                            texts = self._decoder_ids_to_text(self.decode_autoregressive(
-                                memory, memory_key_padding_mask, max_len=decoder_max_len
-                            ))
+                            texts = self.decode_text(memory, memory_key_padding_mask, max_len=decoder_max_len)
                         else:
                             log_probs = nn.functional.log_softmax(self.output_layer(memory), dim=2)
                 except Exception as e:

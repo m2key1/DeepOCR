@@ -258,6 +258,52 @@ class TokenDecoder(nn.Module):
                 break
         return generated
 
+    @torch.no_grad()
+    def beam_search(self, memory: torch.Tensor, memory_key_padding_mask: Optional[torch.Tensor], max_len: int,
+                    beam: int, max_bytes: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Beam search with a key-value cache. Returns [B, beam, T] ids including the start token and each
+        beam's summed log probability [B, beam], best first. A beam never takes a token that would carry
+        it past its line's max_bytes of text."""
+        batch, device = memory.size(1), memory.device
+        memory_kv, attend_mask = self._memory(memory, memory_key_padding_mask)
+        memory_kv = [(key.repeat_interleave(beam, 0), value.repeat_interleave(beam, 0)) for key, value in memory_kv]
+        if attend_mask is not None:
+            attend_mask = attend_mask.repeat_interleave(beam, 0)
+        budget = max_bytes.to(device).repeat_interleave(beam) if max_bytes is not None else None
+        caches = [[] for _ in self.layers]
+        sequences = torch.full((batch * beam, 1), START_TOKEN_ID, dtype=torch.long, device=device)
+        scores = torch.full((batch, beam), float('-inf'), device=device)
+        scores[:, 0] = 0.0
+        finished = torch.zeros(batch * beam, dtype=torch.bool, device=device)
+        written = torch.zeros(batch * beam, dtype=torch.long, device=device)
+        line_offsets = torch.arange(batch, device=device)[:, None] * beam
+        for step in range(max_len):
+            hidden = self.embed_tokens(sequences[:, -1:])
+            cos, sin = self.rotary(torch.tensor([step], device=device), hidden.dtype)
+            for layer, layer_kv, cache in zip(self.layers, memory_kv, caches):
+                hidden = layer(hidden, cos, sin, layer_kv, attend_mask, cache)
+            log_probs = F.log_softmax(self._logits(hidden[:, -1]).float(), dim=-1)
+            log_probs[:, PAD_TOKEN_ID] = float('-inf')
+            if budget is not None:
+                over = written[:, None] + self.token_bytes[None, :] > budget[:, None]
+                over[:, END_TOKEN_ID] = False
+                log_probs = log_probs.masked_fill(over, float('-inf'))
+            # a finished beam continues with padding at no cost, so it keeps its place in the ranking
+            log_probs[finished] = float('-inf')
+            log_probs[finished, PAD_TOKEN_ID] = 0.0
+            vocab = log_probs.size(-1)
+            scores, flat = (scores.reshape(-1, 1) + log_probs).reshape(batch, beam * vocab).topk(beam, dim=-1)
+            origin = (flat // vocab + line_offsets).reshape(-1)
+            token = (flat % vocab).reshape(-1)
+            for cache in caches:
+                cache[:] = [tensor.index_select(0, origin) for tensor in cache]
+            sequences = torch.cat([sequences[origin], token[:, None]], dim=1)
+            written = written[origin] + self.token_bytes[token]
+            finished = finished[origin] | (token == END_TOKEN_ID)
+            if bool(finished.all()):
+                break
+        return sequences.reshape(batch, beam, -1), scores
+
     def ids_to_text(self, generated: torch.Tensor) -> List[str]:
         texts = []
         for row in generated.tolist():

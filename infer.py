@@ -108,8 +108,7 @@ def transcribe(model: DeepOCR, tokenizer: DeepTokenizer, images: list[Image.Imag
         memory, memory_key_padding_mask, *_ = model._encode(
             tensor, conventions=convention_tensor(model, 1, device))
         if use_decoder:
-            generated = model.decode_autoregressive(memory, memory_key_padding_mask, max_len=DECODER_MAX_LEN)
-            predictions.append(model._decoder_ids_to_text(generated)[0])
+            predictions.append(model.decode_text(memory, memory_key_padding_mask, max_len=DECODER_MAX_LEN)[0])
         else:
             logits = model.output_layer(memory)
             pred_ids = logits.argmax(dim=-1).squeeze(1)
