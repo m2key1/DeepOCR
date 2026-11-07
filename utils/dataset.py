@@ -24,6 +24,7 @@ from utils.tokenizer import DeepTokenizer, canonicalize
 
 # Batches travel as raw bytes and the model normalizes them, so padding is plain white.
 PAD_WHITE = 255
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff')
 
 
 def worker_init(worker_id: int) -> None:
@@ -164,7 +165,7 @@ class OCRDataset(Dataset):
         tokenizer: DeepTokenizer,
         augmentations=None,
         no_aug_augmentations=None,
-        image_extensions=('.png', '.jpg', '.jpeg'),
+        image_extensions=IMAGE_EXTENSIONS,
         limit: Optional[int] = None,
         shuffle_before_limit: bool = False,
         target_height=64,

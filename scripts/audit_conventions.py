@@ -7,9 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from train import DATASET_SOURCES, DROP_DATASETS, SPLIT_MANIFEST, TRAIN_DATA_DIR
 from utils.conventions import CONVENTIONS
-from utils.dataset import derive_dataset_label
+from utils.dataset import IMAGE_EXTENSIONS, derive_dataset_label
 
-IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg')
 TEXT_EXTENSIONS = ('.txt', '.gt.txt', '.corrected.txt')
 MIN_LINES = 200
 # Diplomatic and normalized corpora fall far either side of this, so the cut sits in the gap.
