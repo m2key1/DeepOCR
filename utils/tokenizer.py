@@ -1,4 +1,5 @@
 import itertools
+import re
 import unicodedata
 from pathlib import Path
 from typing import Sequence
@@ -10,13 +11,12 @@ import torch
 # gives the same mark one target.
 #
 # Not merged: „ vs “ are a low and a raised mark, and « » are distinct shapes. Greek is real Greek
-# text, so its Latin homoglyphs stay. Cyrillic occurs only as typos inside Latin words.
+# text, so its Latin homoglyphs stay. Cyrillic lookalikes are folded only inside Latin words; see
+# CYRILLIC_HOMOGLYPHS.
 CANONICAL_MAP = {
     '´': "'",       # ACUTE ACCENT
     '`': "'",       # GRAVE ACCENT
     ' ': ' ',       # NO-BREAK SPACE
-    'а': 'a', 'е': 'e', 'к': 'k',   # Cyrillic homoglyphs
-    'л': 'l', 'м': 'm', 'р': 'p',
 
     'ꝛ': 'r',       # LATIN SMALL LETTER R ROTUNDA
 
@@ -60,12 +60,31 @@ CANONICAL_MAP = {
 #   ¹²³ ½ ¼ ¾          footnote markers and fractions, semantically real
 _CANONICAL_TABLE = str.maketrans(CANONICAL_MAP)
 
+# A lookalike typed into a Latin word is a typo; in a Cyrillic word it is the letter itself.
+CYRILLIC_HOMOGLYPHS = {'а': 'a', 'е': 'e', 'к': 'k', 'л': 'l', 'м': 'm', 'р': 'p'}
+_HOMOGLYPH_TABLE = str.maketrans(CYRILLIC_HOMOGLYPHS)
+_HOMOGLYPH_CHARS = frozenset(CYRILLIC_HOMOGLYPHS)
+_WORD = re.compile(r'(?:[^\W\d_]|[\u0300-\u036f])+')
+
+
+def _script(char: str) -> str:
+    return unicodedata.name(char, '').split(' ', 1)[0]
+
+
+def _fold_homoglyph_word(match: re.Match) -> str:
+    word = match.group()
+    scripts = {_script(char) for char in word if char not in _HOMOGLYPH_CHARS and char.isalpha()}
+    return word.translate(_HOMOGLYPH_TABLE) if scripts == {'LATIN'} else word
+
 
 def canonicalize(text: str) -> str:
     """Idempotent, so it runs both in prepare_data.py (keeping the LM corpus and CER references
     canonical) and again in encode() for data that bypassed it. An addition to CANONICAL_MAP makes
     its source token unreachable, so rebuild the KenLM dicts in the same change."""
-    return unicodedata.normalize('NFD', text).translate(_CANONICAL_TABLE)
+    text = unicodedata.normalize('NFD', text).translate(_CANONICAL_TABLE)
+    if _HOMOGLYPH_CHARS.isdisjoint(text):
+        return text
+    return _WORD.sub(_fold_homoglyph_word, text)
 
 
 def check_kenlm_artifacts(kenlm_path, lm_dict_path, tokens) -> tuple:
