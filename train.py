@@ -153,6 +153,8 @@ SAMPLER_SEED = 0
 CORPUS_SAMPLING_ALPHA = 0.5
 # Upper bound on how often a small corpus repeats within one epoch.
 CORPUS_MAX_REPEAT = 5
+# Multiplies a corpus's share by dataset label, for corpora that lose ground at the default mix.
+CORPUS_WEIGHTS = {}
 # Build on unfolded text: an LM that never saw a long s steers beam search away from it. A dict
 # that is not index-parallel to the tokenizer is refused and beam search runs without the LM.
 KENLM_PATH = Path('data/lm/union_bytes_v3.bin')
@@ -602,6 +604,7 @@ def main():
         labels=train_dataset.sample_labels,
         sampling_alpha=CORPUS_SAMPLING_ALPHA,
         max_repeat=CORPUS_MAX_REPEAT,
+        corpus_weights=CORPUS_WEIGHTS,
     )
 
     train_dataloader = DataLoader(

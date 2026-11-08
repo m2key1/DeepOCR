@@ -486,18 +486,21 @@ class OCRDataset(Dataset):
 
         return image, torch.tensor(target, dtype=torch.long), label, flags
 
-def corpus_epoch_indices(labels: list[str], alpha: float, max_repeat: int, epoch: int, seed: int) -> list[int]:
-    """One epoch's lines when each corpus is drawn in proportion to its size to the power alpha, so
-    large corpora do not drown small ones; a corpus repeats at most max_repeat times. A subsampled
-    corpus walks through a fixed shuffle of its lines, so later epochs show the lines it skipped."""
+def corpus_epoch_indices(labels: list[str], alpha: float, max_repeat: int, epoch: int, seed: int,
+                         weights: Optional[dict[str, float]] = None) -> list[int]:
+    """One epoch's lines when each corpus is drawn in proportion to its size to the power alpha, times
+    its entry in weights, so large corpora do not drown small ones; a corpus repeats at most
+    max_repeat times. A subsampled corpus walks through a fixed shuffle of its lines, so later epochs
+    show the lines it skipped."""
     by_corpus = collections.defaultdict(list)
     for index, label in enumerate(labels):
         by_corpus[label].append(index)
     corpora = sorted(by_corpus)
-    weights = [len(by_corpus[label]) ** alpha for label in corpora]
-    total_weight = sum(weights)
+    weights = weights or {}
+    shares = [len(by_corpus[label]) ** alpha * weights.get(label, 1.0) for label in corpora]
+    total_weight = sum(shares)
     indices = []
-    for position, (label, weight) in enumerate(zip(corpora, weights)):
+    for position, (label, weight) in enumerate(zip(corpora, shares)):
         members = by_corpus[label]
         quota = min(round(len(labels) * weight / total_weight), max_repeat * len(members))
         order = members[:]
@@ -525,6 +528,7 @@ class WidthBucketedBatchSampler(Sampler[list[int]]):
         labels: Optional[list[str]] = None,
         sampling_alpha: float = 1.0,
         max_repeat: int = 1,
+        corpus_weights: Optional[dict[str, float]] = None,
     ):
         self.widths = torch.tensor(widths, dtype=torch.long)
         self.batch_size = batch_size
@@ -536,6 +540,7 @@ class WidthBucketedBatchSampler(Sampler[list[int]]):
         self.labels = labels
         self.sampling_alpha = sampling_alpha
         self.max_repeat = max_repeat
+        self.corpus_weights = corpus_weights
         self.epoch = 0
         self.epoch_size = len(self._epoch_indices()) if labels is not None else len(widths)
 
@@ -543,7 +548,8 @@ class WidthBucketedBatchSampler(Sampler[list[int]]):
         self.epoch = epoch
 
     def _epoch_indices(self) -> list[int]:
-        return corpus_epoch_indices(self.labels, self.sampling_alpha, self.max_repeat, self.epoch, self.seed)
+        return corpus_epoch_indices(self.labels, self.sampling_alpha, self.max_repeat, self.epoch, self.seed,
+                                    self.corpus_weights)
 
     def __len__(self) -> int:
         return math.ceil(self.epoch_size / self.batch_size) // self.num_replicas

@@ -19,6 +19,10 @@ class CorpusShares(unittest.TestCase):
         indices = corpus_epoch_indices(LABELS, alpha=0.5, max_repeat=3, epoch=0, seed=0)
         self.assertEqual(count(indices), {'a': 75, 'b': 12, 'c': 30})
 
+    def test_a_corpus_weight_multiplies_its_share(self):
+        indices = corpus_epoch_indices(LABELS, alpha=0.5, max_repeat=10, epoch=0, seed=0, weights={'b': 2.0})
+        self.assertEqual(count(indices), {'a': 67, 'b': 27, 'c': 27})
+
     def test_alpha_one_keeps_the_natural_mix(self):
         indices = corpus_epoch_indices(LABELS, alpha=1.0, max_repeat=3, epoch=0, seed=0)
         self.assertEqual(sorted(indices), list(range(120)))
