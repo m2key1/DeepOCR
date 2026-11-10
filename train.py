@@ -259,6 +259,18 @@ def parse_tunable(raw: str, default):
 for _name in APP_TUNABLES:
     if os.environ.get(f'TRAIN_{_name}', '') != '':
         globals()[_name] = parse_tunable(os.environ[f'TRAIN_{_name}'], globals()[_name])
+
+# A warm start keeps the token decoder its base carries unless the run names a decoder itself;
+# the config and tokenizer travel in the checkpoint, so no LM directory is needed.
+TOKEN_DECODER_CONFIG = None
+TOKEN_DECODER_TOKENIZER = None
+if PRETRAIN_WEIGHTS and DECODER_TYPE == 'char' and not os.environ.get('TRAIN_DECODER_TYPE'):
+    _base = torch.load(PRETRAIN_WEIGHTS, map_location='cpu', weights_only=False, mmap=True)
+    if _base.get('decoder_type') == 'token':
+        DECODER_TYPE = 'token'
+        TOKEN_DECODER_CONFIG = _base['token_decoder_config']
+        TOKEN_DECODER_TOKENIZER = _base['token_decoder_tokenizer']
+    del _base
 if os.environ.get('TRAIN_SNAPSHOT'):
     # Small app snapshots must still give every DDP rank at least one full batch,
     # or the width-bucketed sampler shards to zero iterations per rank.
@@ -567,6 +579,8 @@ def main():
         decoder_lm_path=PRETRAINED_DECODER_LM,
         decoder_type=DECODER_TYPE,
         token_decoder_lm_path=TOKEN_DECODER_LM,
+        token_decoder_config=TOKEN_DECODER_CONFIG,
+        token_decoder_tokenizer=TOKEN_DECODER_TOKENIZER,
     ).to(device)
 
     if FREEZE_ENCODER:

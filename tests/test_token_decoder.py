@@ -1,3 +1,5 @@
+import importlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +8,7 @@ import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import Olmo3Config, Olmo3ForCausalLM
 
+import train
 from utils.model import DeepOCR
 from utils.token_decoder import END_TOKEN_ID, PAD_TOKEN_ID, TokenDecoder
 from utils.tokenizer import DeepTokenizer
@@ -179,3 +182,43 @@ class FrozenEncoder(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FineTuneKeepsTheBaseDecoder(unittest.TestCase):
+    """A run warm-started from a checkpoint with a token decoder would build a character decoder,
+    and the base's decoder weights would be skipped as belonging to another kind."""
+    CONFIG = {'hidden_size': 32, 'vocab_size': len(VOCAB)}
+
+    def configure(self, base: dict, **env) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'base.pt'
+            torch.save({'model_state_dict': {}, **base}, path)
+            saved = {name: os.environ.get(name) for name in ('TRAIN_BASE_CHECKPOINT', *env)}
+            os.environ.update({'TRAIN_BASE_CHECKPOINT': str(path), **env})
+            try:
+                importlib.reload(train)
+            finally:
+                for name, value in saved.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+        self.addCleanup(importlib.reload, train)
+
+    def test_a_token_decoder_base_gives_its_type_config_and_tokenizer(self):
+        self.configure({'decoder_type': 'token', 'token_decoder_config': self.CONFIG,
+                        'token_decoder_tokenizer': 'tokenizer json'})
+        self.assertEqual(train.DECODER_TYPE, 'token')
+        self.assertEqual(train.TOKEN_DECODER_CONFIG, self.CONFIG)
+        self.assertEqual(train.TOKEN_DECODER_TOKENIZER, 'tokenizer json')
+
+    def test_a_character_decoder_base_keeps_the_character_decoder(self):
+        self.configure({'decoder_type': 'char'})
+        self.assertEqual(train.DECODER_TYPE, 'char')
+        self.assertIsNone(train.TOKEN_DECODER_CONFIG)
+
+    def test_a_decoder_the_run_names_wins_over_the_base(self):
+        self.configure({'decoder_type': 'token', 'token_decoder_config': self.CONFIG,
+                        'token_decoder_tokenizer': 'tokenizer json'}, TRAIN_DECODER_TYPE='char')
+        self.assertEqual(train.DECODER_TYPE, 'char')
+        self.assertIsNone(train.TOKEN_DECODER_CONFIG)
