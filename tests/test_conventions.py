@@ -99,9 +99,9 @@ class Sample(unittest.TestCase):
                                     ('Waſſer-', (1.0, 0.0)), ('Wasser-', (0.0, 0.0))})
 
     def test_a_flag_the_corpus_already_keeps_stays_as_transcribed(self):
-        states = ConventionTable(['long_s', 'typographic_punctuation'], {'hsa': [0.0, 1.0]}, flip_prob=0.5)
+        states = ConventionTable(['long_s', 'typographic_punctuation'], {'letters': [0.0, 1.0]}, flip_prob=0.5)
         rng = random.Random(1)
-        texts = {states.sample('hsa', '„Haus“ – Wasser', {'diplomatic': '„Haus“ – Waſſer'}, rng=rng)[0]
+        texts = {states.sample('letters', '„Haus“ – Wasser', {'diplomatic': '„Haus“ – Waſſer'}, rng=rng)[0]
                  for _ in range(200)}
         self.assertEqual(texts, {'„Haus“ – Waſſer', '„Haus“ – Wasser', '„Haus“ - Waſſer', '„Haus“ - Wasser'})
 
