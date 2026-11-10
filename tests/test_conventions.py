@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 from PIL import Image
 
 from utils.conventions import (ConventionTable, hold_trained_flags_to_rate, normalize_long_s,
@@ -12,6 +13,7 @@ from utils.conventions import (ConventionTable, hold_trained_flags_to_rate, norm
                                remap_convention_columns, restore_long_s_by_position,
                                restore_long_s_german)
 from utils.dataset import Collate, OCRDataset
+from utils.model import DeepOCR
 from utils.tokenizer import DeepTokenizer
 
 NAMES = ['long_s', 'oblique_hyphen', 'app_defined']
@@ -204,6 +206,40 @@ class CollateFlags(unittest.TestCase):
 
 
 os.environ.setdefault('OCR_PAIR_CACHE', '0')
+
+class Conditioned(nn.Module):
+    """Just the part of DeepOCR that a fine-tune's conventions touch."""
+    _adopt_base_conventions = DeepOCR._adopt_base_conventions
+
+    def __init__(self, names, by_dataset):
+        super().__init__()
+        self.d_model = 2
+        self.convention_names = list(names)
+        self.convention_by_dataset = dict(by_dataset)
+        self.convention_proj = nn.Linear(len(names), 2, bias=False) if names else None
+
+
+class AdoptBaseConventions(unittest.TestCase):
+    def test_a_fine_tune_given_no_flags_keeps_its_bases(self):
+        model = Conditioned([], {})
+        model._adopt_base_conventions(['long_s', 'oblique_hyphen'])
+        self.assertEqual(model.convention_names, ['long_s', 'oblique_hyphen'])
+        self.assertEqual(tuple(model.convention_proj.weight.shape), (2, 2))
+        self.assertEqual(model.convention_proj.weight.abs().sum().item(), 0)
+
+    def test_a_fine_tune_teaching_a_new_flag_puts_its_own_first_and_pads_its_rows(self):
+        model = Conditioned(['long_s', 'keep_hyphens'], {'job1': [1.0, 1.0], 'job2': [0.0, 0.0]})
+        model._adopt_base_conventions(['long_s', 'oblique_hyphen'])
+        self.assertEqual(model.convention_names, ['long_s', 'keep_hyphens', 'oblique_hyphen'])
+        self.assertEqual(model.convention_by_dataset, {'job1': [1.0, 1.0, 0.0], 'job2': [0.0, 0.0, 0.0]})
+        self.assertEqual(tuple(model.convention_proj.weight.shape), (2, 3))
+
+    def test_a_fine_tune_that_already_names_every_base_flag_is_left_alone(self):
+        model = Conditioned(['long_s'], {'job1': [1.0]})
+        proj = model.convention_proj
+        model._adopt_base_conventions(['long_s'])
+        self.assertIs(model.convention_proj, proj)
+
 
 if __name__ == '__main__':
     unittest.main()

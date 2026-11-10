@@ -1306,6 +1306,19 @@ class DeepOCR(nn.Module):
             texts.append(self.tokenizer.decode(row, skip_special_tokens=True))
         return texts
 
+    def _adopt_base_conventions(self, base_names: Sequence[str]) -> None:
+        """A fine-tune keeps every flag its base was conditioned on, after the ones it was given:
+        a flag the new data never sets still means what it meant, rather than being forgotten."""
+        merged = self.convention_names + [n for n in base_names if n not in self.convention_names]
+        if merged == self.convention_names:
+            return
+        added = len(merged) - len(self.convention_names)
+        self.convention_by_dataset = {label: list(row) + [0.0] * added
+                                      for label, row in self.convention_by_dataset.items()}
+        self.convention_names = merged
+        self.convention_proj = nn.Linear(len(merged), self.d_model, bias=False)
+        nn.init.zeros_(self.convention_proj.weight)
+
     def _load_pretrained_weights(self):
         try:
             if not self.weight_path or not self.weight_path.exists():
@@ -1314,6 +1327,11 @@ class DeepOCR(nn.Module):
 
             checkpoint = torch.load(self.weight_path, map_location='cpu', weights_only=False)
             pretrained_state = checkpoint['model_state_dict']
+            base_conventions = list(checkpoint.get('convention_names') or ())
+            self._adopt_base_conventions(base_conventions)
+            if 'convention_proj.weight' in pretrained_state:
+                pretrained_state['convention_proj.weight'] = remap_convention_columns(
+                    pretrained_state['convention_proj.weight'], base_conventions, self.convention_names)
             model_state = self.state_dict()
 
             # A different backbone architecture shares some tensor names and shapes by
