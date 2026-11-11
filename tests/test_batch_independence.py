@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from utils.backbones import MaskedBatchNorm2d
+from utils.backbones import masked_norm
 from utils.model import DeepOCR
 from utils.tokenizer import DeepTokenizer
 
@@ -74,12 +74,23 @@ class TrainingStatisticsSkipPadding(unittest.TestCase):
         padded = torch.cat([line, torch.full((1, 4, 2, 7), 7.0)], dim=3)
         keep = torch.zeros(1, 1, 1, 12)
         keep[..., :5] = 1.0
-        alone, beside = MaskedBatchNorm2d(4).train(), MaskedBatchNorm2d(4).train()
+        alone, beside = nn.BatchNorm2d(4).train(), nn.BatchNorm2d(4).train()
         expected = alone(line)
-        got = beside(padded, keep)
+        got = masked_norm(beside, padded, keep)
         torch.testing.assert_close(got[..., :5], expected, atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(beside.running_mean, alone.running_mean, atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(beside.running_var, alone.running_var, atol=1e-6, rtol=1e-6)
+
+
+class MultiGpuTraining(unittest.TestCase):
+    def test_a_backbone_converted_to_sync_batchnorm_reads_as_before(self):
+        """Distributed training swaps every BatchNorm for SyncBatchNorm; the masking must survive it."""
+        model = tiny_model(batch_independent=True)
+        before, _ = short_line_features(model, beside_long=True)
+        model.backbone = nn.SyncBatchNorm.convert_sync_batchnorm(model.backbone)
+        self.assertTrue(any(isinstance(m, nn.SyncBatchNorm) for m in model.backbone.modules()))
+        after, _ = short_line_features(model, beside_long=True)
+        torch.testing.assert_close(after, before, atol=1e-6, rtol=1e-6)
 
 
 class CheckpointsKeepTheirBackbone(unittest.TestCase):

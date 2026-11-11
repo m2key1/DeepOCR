@@ -60,21 +60,19 @@ def column_keep(widths: torch.Tensor, stride: int, columns: int, dtype: torch.dt
     return keep.to(dtype)[:, None, None, :]
 
 
-class MaskedBatchNorm2d(nn.BatchNorm2d):
-    """BatchNorm whose training statistics come from each line's own columns, so the padding a batch
-    adds after a short line cannot shift them. The own columns are packed into one row for the fused
-    kernel, which keeps memory at plain BatchNorm's. Evaluation uses the running statistics, as
-    BatchNorm does."""
-
-    def forward(self, x: torch.Tensor, keep: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if keep is None or not self.training:
-            return super().forward(x)
-        batch, channels, height, width = x.shape
-        own = keep.reshape(batch * width).nonzero(as_tuple=True)[0]
-        columns = x.permute(1, 2, 0, 3).reshape(channels, height, batch * width)
-        normed = super().forward(columns.index_select(2, own).unsqueeze(0)).squeeze(0)
-        out = columns.new_zeros(channels, height, batch * width).index_copy(2, own, normed)
-        return out.reshape(channels, height, batch, width).permute(2, 0, 1, 3)
+def masked_norm(norm: nn.Module, x: torch.Tensor, keep: Optional[torch.Tensor]) -> torch.Tensor:
+    """A BatchNorm (or the SyncBatchNorm distributed training swaps in) whose training statistics come
+    from each line's own columns, so the padding a batch adds after a short line cannot shift them. The
+    own columns are packed into one row for the fused kernel, which keeps memory at plain BatchNorm's.
+    Evaluation uses the running statistics, as BatchNorm does."""
+    if keep is None or not norm.training:
+        return norm(x)
+    batch, channels, height, width = x.shape
+    own = keep.reshape(batch * width).nonzero(as_tuple=True)[0]
+    columns = x.permute(1, 2, 0, 3).reshape(channels, height, batch * width)
+    normed = norm(columns.index_select(2, own).unsqueeze(0)).squeeze(0)
+    out = columns.new_zeros(channels, height, batch * width).index_copy(2, own, normed)
+    return out.reshape(channels, height, batch, width).permute(2, 0, 1, 3)
 
 
 class SqueezeExcite(nn.Module):
@@ -109,11 +107,11 @@ class DepthSepConv(nn.Module):
         self.depthwise = nn.Conv2d(
             in_channels, in_channels, kernel_size, stride, padding, groups=in_channels, bias=False
         )
-        self.dw_bn = MaskedBatchNorm2d(in_channels)
+        self.dw_bn = nn.BatchNorm2d(in_channels)
         self.dw_act = nn.Hardswish(inplace=True)
         self.se = SqueezeExcite(in_channels) if use_se else nn.Identity()
         self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        self.pw_bn = MaskedBatchNorm2d(out_channels)
+        self.pw_bn = nn.BatchNorm2d(out_channels)
         self.pw_act = nn.Hardswish(inplace=True)
         if self.use_residual:
             nn.init.zeros_(self.pw_bn.weight)
@@ -122,9 +120,9 @@ class DepthSepConv(nn.Module):
         identity = x
         out = self.depthwise(x)
         keep = column_keep(widths, self.width_stride, out.shape[3], out.dtype) if widths is not None else None
-        out = self.dw_act(self.dw_bn(out, keep))
+        out = self.dw_act(masked_norm(self.dw_bn, out, keep))
         out = self.se(out, keep) if self.use_se else out
-        out = self.pw_bn(self.pointwise(out), keep)
+        out = masked_norm(self.pw_bn, self.pointwise(out), keep)
         if self.use_residual:
             out = out + identity
         out = self.pw_act(out)
@@ -164,7 +162,7 @@ class CNNBackbone(nn.Module):
 
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, base_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            MaskedBatchNorm2d(base_channels),
+            nn.BatchNorm2d(base_channels),
             nn.Hardswish(inplace=True),
         )
 
@@ -217,7 +215,7 @@ class GroupedConv(nn.Module):
             groups -= 1
         self.use_residual = tuple(stride) == (1, 1) and in_channels == out_channels
         self.conv = nn.Conv2d(in_channels, out_channels, 3, stride, 1, groups=groups, bias=False)
-        self.bn = MaskedBatchNorm2d(out_channels)
+        self.bn = nn.BatchNorm2d(out_channels)
         self.se = SqueezeExcite(out_channels) if use_se else nn.Identity()
         self.act = nn.Hardswish(inplace=True)
         if self.use_residual:
@@ -226,7 +224,7 @@ class GroupedConv(nn.Module):
     def forward(self, x: torch.Tensor, widths: Optional[torch.Tensor] = None) -> torch.Tensor:
         out = self.conv(x)
         keep = column_keep(widths, self.width_stride, out.shape[3], out.dtype) if widths is not None else None
-        out = self.bn(out, keep)
+        out = masked_norm(self.bn, out, keep)
         out = self.se(out, keep) if self.use_se else out
         if self.use_residual:
             out = out + x
@@ -261,7 +259,7 @@ class GroupedCNNBackbone(nn.Module):
 
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, stem_channels, kernel_size=5, stride=(2, 1), padding=2, bias=False),
-            MaskedBatchNorm2d(stem_channels),
+            nn.BatchNorm2d(stem_channels),
             nn.Hardswish(inplace=True),
         )
 
@@ -312,7 +310,7 @@ def run_masked(backbone: nn.Module, x: torch.Tensor, widths: Optional[torch.Tens
     conv, norm, act = backbone.stem
     x = conv(x)
     keep = column_keep(widths, 1, x.shape[3], x.dtype) if widths is not None else None
-    x = act(norm(x, keep))
+    x = act(masked_norm(norm, x, keep))
     if keep is not None:
         x = x * keep
     for block in backbone.blocks:
