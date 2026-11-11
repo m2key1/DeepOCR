@@ -118,6 +118,8 @@ PRETRAINED_DECODER_LM = Path('runs/decoder_lm_bytes.pt')
 # with tokenizer.json) that reads the encoder through new cross-attention layers.
 DECODER_TYPE = 'char'
 TOKEN_DECODER_LM = None
+# Each line's backbone features come from its own columns only, so a reading never depends on its batch.
+BATCH_INDEPENDENT_BACKBONE = True
 # The cross-attention starts from scratch inside a pretrained LM, so it learns faster than the LM it reads into.
 TOKEN_DECODER_NEW_LR = 3e-4
 # Share of teacher-forced input tokens swapped for random ones, so the decoder reads the image
@@ -581,6 +583,7 @@ def main():
         token_decoder_lm_path=TOKEN_DECODER_LM,
         token_decoder_config=TOKEN_DECODER_CONFIG,
         token_decoder_tokenizer=TOKEN_DECODER_TOKENIZER,
+        batch_independent_backbone=BATCH_INDEPENDENT_BACKBONE,
     ).to(device)
 
     if FREEZE_ENCODER:

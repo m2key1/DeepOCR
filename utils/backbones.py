@@ -1,5 +1,5 @@
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -53,6 +53,39 @@ class TrOCRBackbone(nn.Module):
         return patch_features.view(B, grid_height, grid_width, self.feature_dim)
 
 
+def column_keep(widths: torch.Tensor, stride: int, columns: int, dtype: torch.dtype) -> torch.Tensor:
+    """[B, 1, 1, columns]: 1 on each line's own columns at this width stride, 0 on the padding after it."""
+    own = torch.div(widths + stride - 1, stride, rounding_mode='floor')
+    keep = torch.arange(columns, device=widths.device)[None, :] < own[:, None]
+    return keep.to(dtype)[:, None, None, :]
+
+
+class MaskedBatchNorm2d(nn.BatchNorm2d):
+    """BatchNorm whose training statistics come from each line's own columns, so the padding a batch
+    adds after a short line cannot shift them. Evaluation uses the running statistics, as BatchNorm does."""
+
+    def forward(self, x: torch.Tensor, keep: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if keep is None or not self.training:
+            return super().forward(x)
+        values = x.float()
+        weight = keep.float().expand(x.shape[0], 1, x.shape[2], x.shape[3])
+        count = weight.sum()
+        mean = (values * weight).sum(dim=(0, 2, 3)) / count
+        centered = values - mean.view(1, -1, 1, 1)
+        var = (centered.pow(2) * weight).sum(dim=(0, 2, 3)) / count
+        if self.track_running_stats:
+            with torch.no_grad():
+                self.num_batches_tracked += 1
+                momentum = self.momentum if self.momentum is not None else 1.0 / float(self.num_batches_tracked)
+                self.running_mean.lerp_(mean.to(self.running_mean.dtype), momentum)
+                unbiased = var * count / (count - 1).clamp(min=1)
+                self.running_var.lerp_(unbiased.to(self.running_var.dtype), momentum)
+        out = centered / torch.sqrt(var.view(1, -1, 1, 1) + self.eps)
+        if self.affine:
+            out = out * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+        return out.to(x.dtype)
+
+
 class SqueezeExcite(nn.Module):
 
     def __init__(self, channels: int, reduction: int = 4):
@@ -63,8 +96,11 @@ class SqueezeExcite(nn.Module):
         self.fc2 = nn.Conv2d(reduced, channels, kernel_size=1)
         self.gate = nn.Hardsigmoid(inplace=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        scale = x.mean(dim=(2, 3), keepdim=True)
+    def forward(self, x: torch.Tensor, keep: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if keep is None:
+            scale = x.mean(dim=(2, 3), keepdim=True)
+        else:
+            scale = (x * keep).sum(dim=(2, 3), keepdim=True) / (keep.sum(dim=(2, 3), keepdim=True) * x.shape[2])
         scale = self.act(self.fc1(scale))
         scale = self.gate(self.fc2(scale))
         return x * scale
@@ -72,30 +108,36 @@ class SqueezeExcite(nn.Module):
 
 class DepthSepConv(nn.Module):
 
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: Tuple[int, int], use_se: bool):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: Tuple[int, int], use_se: bool,
+                 width_stride: int = 1):
         super().__init__()
         padding = kernel_size // 2
         self.use_residual = tuple(stride) == (1, 1) and in_channels == out_channels
+        self.use_se = use_se
+        self.width_stride = width_stride
         self.depthwise = nn.Conv2d(
             in_channels, in_channels, kernel_size, stride, padding, groups=in_channels, bias=False
         )
-        self.dw_bn = nn.BatchNorm2d(in_channels)
+        self.dw_bn = MaskedBatchNorm2d(in_channels)
         self.dw_act = nn.Hardswish(inplace=True)
         self.se = SqueezeExcite(in_channels) if use_se else nn.Identity()
         self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        self.pw_bn = nn.BatchNorm2d(out_channels)
+        self.pw_bn = MaskedBatchNorm2d(out_channels)
         self.pw_act = nn.Hardswish(inplace=True)
         if self.use_residual:
             nn.init.zeros_(self.pw_bn.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, widths: Optional[torch.Tensor] = None) -> torch.Tensor:
         identity = x
-        out = self.dw_act(self.dw_bn(self.depthwise(x)))
-        out = self.se(out)
-        out = self.pw_bn(self.pointwise(out))
+        out = self.depthwise(x)
+        keep = column_keep(widths, self.width_stride, out.shape[3], out.dtype) if widths is not None else None
+        out = self.dw_act(self.dw_bn(out, keep))
+        out = self.se(out, keep) if self.use_se else out
+        out = self.pw_bn(self.pointwise(out), keep)
         if self.use_residual:
             out = out + identity
-        return self.pw_act(out)
+        out = self.pw_act(out)
+        return out if keep is None else out * keep
 
 
 class CNNBackbone(nn.Module):
@@ -110,6 +152,7 @@ class CNNBackbone(nn.Module):
         in_channels: int = 3,
         base_channels: int = 96,
         stage_depths: Tuple[int, ...] = (1, 2, 4, 6),
+        batch_independent: bool = False,
     ):
         super().__init__()
         for name, value in (('patch_size', patch_size), ('width_stride', width_stride)):
@@ -130,13 +173,14 @@ class CNNBackbone(nn.Module):
 
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, base_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(base_channels),
+            MaskedBatchNorm2d(base_channels),
             nn.Hardswish(inplace=True),
         )
 
         blocks = []
         in_ch = base_channels
         out_channels = base_channels
+        total_stride_w = 1
         for stage in range(num_stages):
             stages_left = num_stages - stage
             stride_h = 2 if stages_left <= num_height_downsamples else 1
@@ -148,7 +192,9 @@ class CNNBackbone(nn.Module):
                 is_first = block_idx == 0
                 block_in = in_ch if is_first else stage_out
                 block_stride = (stride_h, stride_w) if is_first else (1, 1)
-                blocks.append(DepthSepConv(block_in, stage_out, kernel_size, block_stride, use_se=in_last_two))
+                total_stride_w *= block_stride[1]
+                blocks.append(DepthSepConv(block_in, stage_out, kernel_size, block_stride, use_se=in_last_two,
+                                           width_stride=total_stride_w))
             in_ch = stage_out
             out_channels = min(out_channels * 2, feature_dim)
         self.blocks = nn.Sequential(*blocks)
@@ -156,11 +202,10 @@ class CNNBackbone(nn.Module):
         self.feature_dim = feature_dim
         self.patch_size = patch_size
         self.patch_size_w = width_stride
+        self.batch_independent = batch_independent
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.stem(x)
-        x = self.blocks(x)
-        return x.permute(0, 2, 3, 1).contiguous()
+    def forward(self, x: torch.Tensor, widths: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return run_masked(self, x, widths)
 
 
 class GroupedConv(nn.Module):
@@ -172,24 +217,30 @@ class GroupedConv(nn.Module):
     use the tensor cores while staying well under a dense conv's parameter count."""
 
     def __init__(self, in_channels: int, out_channels: int, stride: Tuple[int, int], use_se: bool,
-                 group_width: int = 32):
+                 group_width: int = 32, width_stride: int = 1):
         super().__init__()
+        self.use_se = use_se
+        self.width_stride = width_stride
         groups = max(1, min(in_channels, out_channels) // group_width)
         while in_channels % groups or out_channels % groups:
             groups -= 1
         self.use_residual = tuple(stride) == (1, 1) and in_channels == out_channels
         self.conv = nn.Conv2d(in_channels, out_channels, 3, stride, 1, groups=groups, bias=False)
-        self.bn = nn.BatchNorm2d(out_channels)
+        self.bn = MaskedBatchNorm2d(out_channels)
         self.se = SqueezeExcite(out_channels) if use_se else nn.Identity()
         self.act = nn.Hardswish(inplace=True)
         if self.use_residual:
             nn.init.zeros_(self.bn.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.se(self.bn(self.conv(x)))
+    def forward(self, x: torch.Tensor, widths: Optional[torch.Tensor] = None) -> torch.Tensor:
+        out = self.conv(x)
+        keep = column_keep(widths, self.width_stride, out.shape[3], out.dtype) if widths is not None else None
+        out = self.bn(out, keep)
+        out = self.se(out, keep) if self.use_se else out
         if self.use_residual:
             out = out + x
-        return self.act(out)
+        out = self.act(out)
+        return out if keep is None else out * keep
 
 
 class GroupedCNNBackbone(nn.Module):
@@ -210,6 +261,7 @@ class GroupedCNNBackbone(nn.Module):
         stem_channels: int = 64,
         stage_depths: Tuple[int, ...] = (3, 6, 8),
         group_width: int = 32,
+        batch_independent: bool = False,
     ):
         super().__init__()
         for name, value in (('patch_size', patch_size), ('width_stride', width_stride)):
@@ -218,7 +270,7 @@ class GroupedCNNBackbone(nn.Module):
 
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, stem_channels, kernel_size=5, stride=(2, 1), padding=2, bias=False),
-            nn.BatchNorm2d(stem_channels),
+            MaskedBatchNorm2d(stem_channels),
             nn.Hardswish(inplace=True),
         )
 
@@ -234,6 +286,7 @@ class GroupedCNNBackbone(nn.Module):
 
         blocks = []
         in_ch = stem_channels
+        total_stride_w = 1
         for stage in range(num_stages):
             stride = (2 if remaining_h > 1 else 1, 2 if remaining_w > 1 else 1)
             remaining_h //= stride[0]
@@ -243,18 +296,37 @@ class GroupedCNNBackbone(nn.Module):
             for block_idx in range(max(1, depths[stage])):
                 block_in = in_ch if block_idx == 0 else out_ch
                 block_stride = stride if block_idx == 0 else (1, 1)
-                blocks.append(GroupedConv(block_in, out_ch, block_stride, use_se, group_width))
+                total_stride_w *= block_stride[1]
+                blocks.append(GroupedConv(block_in, out_ch, block_stride, use_se, group_width, total_stride_w))
             in_ch = out_ch
         self.blocks = nn.Sequential(*blocks)
 
         self.feature_dim = feature_dim
         self.patch_size = patch_size
         self.patch_size_w = width_stride
+        self.batch_independent = batch_independent
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.stem(x)
-        x = self.blocks(x)
-        return x.permute(0, 2, 3, 1).contiguous()
+    def forward(self, x: torch.Tensor, widths: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return run_masked(self, x, widths)
+
+
+def run_masked(backbone: nn.Module, x: torch.Tensor, widths: Optional[torch.Tensor]) -> torch.Tensor:
+    """A CNN backbone's forward. With batch_independent and the lines' pixel widths, every stage zeroes
+    the columns after each line, as a lone line's border padding does, and normalises and squeezes over
+    the line's own columns, so what a line reads never depends on what shares its batch."""
+    if not backbone.batch_independent or widths is None:
+        widths = None
+    else:
+        x = x * column_keep(widths, 1, x.shape[3], x.dtype)
+    conv, norm, act = backbone.stem
+    x = conv(x)
+    keep = column_keep(widths, 1, x.shape[3], x.dtype) if widths is not None else None
+    x = act(norm(x, keep))
+    if keep is not None:
+        x = x * keep
+    for block in backbone.blocks:
+        x = block(x, widths)
+    return x.permute(0, 2, 3, 1).contiguous()
 
 
 def build_backbone(
@@ -267,7 +339,10 @@ def build_backbone(
     cnn_width_stride: int = 16,
     cnn_base_channels: int = 96,
     cnn_stage_depths: Tuple[int, ...] = (1, 2, 4, 6),
+    batch_independent: bool = False,
 ) -> nn.Module:
+    if batch_independent and name not in ('cnn', 'cnn_grouped'):
+        raise ValueError(f"Only the CNN backbones keep each line to its own columns; '{name}' does not.")
     if name == 'dinov3':
         return DINOv3Backbone(dinov3_ckpt)
     if name == 'trocr':
@@ -280,6 +355,7 @@ def build_backbone(
             in_channels=in_channels,
             base_channels=cnn_base_channels,
             stage_depths=cnn_stage_depths,
+            batch_independent=batch_independent,
         )
     if name == 'cnn_grouped':
         return GroupedCNNBackbone(
@@ -287,5 +363,6 @@ def build_backbone(
             patch_size=cnn_patch_size,
             width_stride=cnn_width_stride,
             in_channels=in_channels,
+            batch_independent=batch_independent,
         )
     raise ValueError(f"Unknown backbone '{name}'; expected 'dinov3', 'trocr', 'cnn' or 'cnn_grouped'.")

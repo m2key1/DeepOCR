@@ -630,6 +630,7 @@ class DeepOCR(nn.Module):
         token_decoder_lm_path: Optional[Path] = None,
         token_decoder_config: Optional[dict] = None,
         token_decoder_tokenizer: Optional[str] = None,
+        batch_independent_backbone: bool = False,
     ):
         super(DeepOCR, self).__init__()
         self.tokenizer = tokenizer
@@ -655,8 +656,10 @@ class DeepOCR(nn.Module):
         self.backbone_name = backbone_name
         self.backbone = build_backbone(
             backbone_name, dinov3_ckpt=dinov3_ckpt, cnn_feature_dim=self.d_model,
-            cnn_width_stride=cnn_width_stride, cnn_patch_size=cnn_patch_size
+            cnn_width_stride=cnn_width_stride, cnn_patch_size=cnn_patch_size,
+            batch_independent=batch_independent_backbone
         )
+        self.batch_independent_backbone = batch_independent_backbone
 
         for param in self.backbone.parameters():
             param.requires_grad = not self.freeze_backbone
@@ -885,8 +888,13 @@ class DeepOCR(nn.Module):
         B = x.size(0)
         x = normalize_images(x)
 
+        widths = None
+        if attention_masks is not None and self.batch_independent_backbone:
+            own = (attention_masks.view(B, -1, self.grid_height).logical_not().any(dim=2)
+                   if self.use_2d_structure else attention_masks.logical_not())
+            widths = own.sum(dim=1) * self.patch_size_w
         with torch.set_grad_enabled(not self.freeze_backbone):
-            feature_grid = self.backbone(x)    # [B, grid_height, grid_width, feature_dim]
+            feature_grid = self.backbone(x, widths) if widths is not None else self.backbone(x)
 
         grid_width = feature_grid.size(2)
 
@@ -2564,6 +2572,7 @@ class DeepOCR(nn.Module):
         payload = {
             'target_height': self.target_height,
             'backbone_name': self.backbone_name,
+            'batch_independent_backbone': self.batch_independent_backbone,
             'cnn_width_stride': self.patch_size_w,
             'cnn_patch_size': self.patch_size,
             'dino_v3_backbone': self.dinov3_ckpt,
@@ -2701,6 +2710,7 @@ class DeepOCR(nn.Module):
             decoder_type=checkpoint.get('decoder_type', 'char'),
             token_decoder_config=checkpoint.get('token_decoder_config'),
             token_decoder_tokenizer=checkpoint.get('token_decoder_tokenizer'),
+            batch_independent_backbone=checkpoint.get('batch_independent_backbone', False),
         )
 
         model_keys = set(model.state_dict().keys())
