@@ -62,28 +62,19 @@ def column_keep(widths: torch.Tensor, stride: int, columns: int, dtype: torch.dt
 
 class MaskedBatchNorm2d(nn.BatchNorm2d):
     """BatchNorm whose training statistics come from each line's own columns, so the padding a batch
-    adds after a short line cannot shift them. Evaluation uses the running statistics, as BatchNorm does."""
+    adds after a short line cannot shift them. The own columns are packed into one row for the fused
+    kernel, which keeps memory at plain BatchNorm's. Evaluation uses the running statistics, as
+    BatchNorm does."""
 
     def forward(self, x: torch.Tensor, keep: Optional[torch.Tensor] = None) -> torch.Tensor:
         if keep is None or not self.training:
             return super().forward(x)
-        values = x.float()
-        weight = keep.float().expand(x.shape[0], 1, x.shape[2], x.shape[3])
-        count = weight.sum()
-        mean = (values * weight).sum(dim=(0, 2, 3)) / count
-        centered = values - mean.view(1, -1, 1, 1)
-        var = (centered.pow(2) * weight).sum(dim=(0, 2, 3)) / count
-        if self.track_running_stats:
-            with torch.no_grad():
-                self.num_batches_tracked += 1
-                momentum = self.momentum if self.momentum is not None else 1.0 / float(self.num_batches_tracked)
-                self.running_mean.lerp_(mean.to(self.running_mean.dtype), momentum)
-                unbiased = var * count / (count - 1).clamp(min=1)
-                self.running_var.lerp_(unbiased.to(self.running_var.dtype), momentum)
-        out = centered / torch.sqrt(var.view(1, -1, 1, 1) + self.eps)
-        if self.affine:
-            out = out * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
-        return out.to(x.dtype)
+        batch, channels, height, width = x.shape
+        own = keep.reshape(batch * width).nonzero(as_tuple=True)[0]
+        columns = x.permute(1, 2, 0, 3).reshape(channels, height, batch * width)
+        normed = super().forward(columns.index_select(2, own).unsqueeze(0)).squeeze(0)
+        out = columns.new_zeros(channels, height, batch * width).index_copy(2, own, normed)
+        return out.reshape(channels, height, batch, width).permute(2, 0, 1, 3)
 
 
 class SqueezeExcite(nn.Module):
