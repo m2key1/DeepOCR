@@ -60,21 +60,6 @@ def column_keep(widths: torch.Tensor, stride: int, columns: int, dtype: torch.dt
     return keep.to(dtype)[:, None, None, :]
 
 
-def masked_norm(norm: nn.Module, x: torch.Tensor, keep: Optional[torch.Tensor]) -> torch.Tensor:
-    """A BatchNorm (or the SyncBatchNorm distributed training swaps in) whose training statistics come
-    from each line's own columns, so the padding a batch adds after a short line cannot shift them. The
-    own columns are packed into one row for the fused kernel, which keeps memory at plain BatchNorm's.
-    Evaluation uses the running statistics, as BatchNorm does."""
-    if keep is None or not norm.training:
-        return norm(x)
-    batch, channels, height, width = x.shape
-    own = keep.reshape(batch * width).nonzero(as_tuple=True)[0]
-    columns = x.permute(1, 2, 0, 3).reshape(channels, height, batch * width)
-    normed = norm(columns.index_select(2, own).unsqueeze(0)).squeeze(0)
-    out = columns.new_zeros(channels, height, batch * width).index_copy(2, own, normed)
-    return out.reshape(channels, height, batch, width).permute(2, 0, 1, 3)
-
-
 class SqueezeExcite(nn.Module):
 
     def __init__(self, channels: int, reduction: int = 4):
@@ -120,9 +105,9 @@ class DepthSepConv(nn.Module):
         identity = x
         out = self.depthwise(x)
         keep = column_keep(widths, self.width_stride, out.shape[3], out.dtype) if widths is not None else None
-        out = self.dw_act(masked_norm(self.dw_bn, out, keep))
+        out = self.dw_act(self.dw_bn(out))
         out = self.se(out, keep) if self.use_se else out
-        out = masked_norm(self.pw_bn, self.pointwise(out), keep)
+        out = self.pw_bn(self.pointwise(out))
         if self.use_residual:
             out = out + identity
         out = self.pw_act(out)
@@ -224,7 +209,7 @@ class GroupedConv(nn.Module):
     def forward(self, x: torch.Tensor, widths: Optional[torch.Tensor] = None) -> torch.Tensor:
         out = self.conv(x)
         keep = column_keep(widths, self.width_stride, out.shape[3], out.dtype) if widths is not None else None
-        out = masked_norm(self.bn, out, keep)
+        out = self.bn(out)
         out = self.se(out, keep) if self.use_se else out
         if self.use_residual:
             out = out + x
@@ -301,8 +286,10 @@ class GroupedCNNBackbone(nn.Module):
 
 def run_masked(backbone: nn.Module, x: torch.Tensor, widths: Optional[torch.Tensor]) -> torch.Tensor:
     """A CNN backbone's forward. With batch_independent and the lines' pixel widths, every stage zeroes
-    the columns after each line, as a lone line's border padding does, and normalises and squeezes over
-    the line's own columns, so what a line reads never depends on what shares its batch."""
+    the columns after each line, as a lone line's border padding does, and squeeze-excite pools over the
+    line's own columns, so what a line reads never depends on what shares its batch. BatchNorm reads with
+    its running statistics; in training it still sees the zeroed padding, the usual practice for padded
+    batches."""
     if not backbone.batch_independent or widths is None:
         widths = None
     else:
@@ -310,7 +297,7 @@ def run_masked(backbone: nn.Module, x: torch.Tensor, widths: Optional[torch.Tens
     conv, norm, act = backbone.stem
     x = conv(x)
     keep = column_keep(widths, 1, x.shape[3], x.dtype) if widths is not None else None
-    x = act(masked_norm(norm, x, keep))
+    x = act(norm(x))
     if keep is not None:
         x = x * keep
     for block in backbone.blocks:
