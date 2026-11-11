@@ -93,9 +93,9 @@ The same checkpoint with the long-s flag on and off. Corpora disagree about the 
 | Encoder | 4 MoE transformer layers, d_model 512, 8 heads. 62 SwiGLU experts plus 2 convolutional ones, top-8 routing, 1 shared expert, loss-free bias balancing, DropPath, span masking during training. |
 | Conditioning | Per-line flags for long s, the Fraktur oblique hyphen and typographic punctuation, measured per corpus by `scripts/audit_conventions.py`; `CONVENTION` in `infer.py` picks which convention to emit |
 | CTC head | Linear + log-softmax, CTC loss with entropy smoothing |
-| Decoder | 4-layer transformer decoder (teacher-forced cross-entropy, label smoothing), optionally initialised from a pretrained character LM |
+| Decoder | 4-layer transformer decoder (teacher-forced cross-entropy, label smoothing), optionally initialised from a pretrained character LM. Or a subword decoder (`DECODER_TYPE = 'token'`): an OLMo 3 language model that reads the encoder through new cross-attention layers |
 | Vocabulary | Byte-level: 5 specials + 256 byte values, token id = 5 + byte |
-| Decoding | Greedy CTC, CTC beam search with a fused KenLM (torchaudio/flashlight), optional n-best rescoring with the decoder |
+| Decoding | Greedy CTC, CTC beam search with a fused KenLM (torchaudio/flashlight), optional n-best rescoring with the decoder. A subword decoder reads the line itself: its beam search, each candidate reranked by how well the CTC head reads it |
 
 </details>
 
@@ -201,6 +201,8 @@ This writes `union.bin` and `union.dict`; point `KENLM_PATH` and `LM_DICT_PATH` 
 
 **Decoder pretraining.** `pretrain_decoder.py` trains the character decoder as a standalone LM on transcriptions; set `PRETRAINED_DECODER_LM` in `train.py` to initialise the decoder from it.
 
+**Subword decoder.** Set `DECODER_TYPE = 'token'` and point `TOKEN_DECODER_LM` at an OLMo 3 checkpoint directory (`config.json`, `model.safetensors`, `tokenizer.json`). Its layers keep their pretrained weights and gain cross-attention to the encoder, trained at `TOKEN_DECODER_NEW_LR`; `FREEZE_ENCODER` trains the decoder alone. Teacher-forced inputs are partly corrupted (`TOKEN_DECODER_INPUT_NOISE`), so the decoder reads the image rather than continuing the text, and generation stops at a byte budget taken from the CTC best path. The decoder we use is a 238M student distilled from [HabsburgLLM](https://huggingface.co/M2key1/HabsburgLLM), an OLMo 3 model trained on Austrian newspapers from 1800 to 1914, on its 48k tokenizer. The CTC head stays byte-level. The checkpoint carries the decoder's config and tokenizer, so a run warm-started from it keeps the subword decoder without the LM directory; `SELECT_ON_DECODER` picks the checkpoint on the decoder's reading.
+
 </details>
 
 <details>
@@ -212,7 +214,7 @@ This writes `union.bin` and `union.dict`; point `KENLM_PATH` and `LM_DICT_PATH` 
 python infer.py
 ```
 
-The same module is the Python API shown in the quickstart. Besides `transcribe_beam`, `transcribe(model, tokenizer, images, device, use_decoder=False)` gives greedy CTC (`use_decoder=True` runs the autoregressive decoder instead) and `transcribe_rescored` lets the decoder re-rank the beam's 8-best.
+The same module is the Python API shown in the quickstart. Besides `transcribe_beam`, `transcribe(model, tokenizer, images, device, use_decoder=False)` gives greedy CTC (`use_decoder=True` runs the autoregressive decoder instead; a subword decoder then searches `DECODER_BEAM` beams and keeps the one the CTC head reads best) and `transcribe_rescored` lets the decoder re-rank the beam's 8-best.
 
 `inference.ipynb` walks through the same calls and renders per-column confidence, entropy and expert-routing maps.
 
