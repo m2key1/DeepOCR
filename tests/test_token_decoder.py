@@ -217,6 +217,27 @@ class FineTuneKeepsTheBaseDecoder(unittest.TestCase):
         self.assertEqual(train.DECODER_TYPE, 'char')
         self.assertIsNone(train.TOKEN_DECODER_CONFIG)
 
+    def test_a_token_decoder_base_fine_tunes_with_the_settings_it_was_trained_with(self):
+        self.configure({'decoder_type': 'token', 'token_decoder_config': self.CONFIG,
+                        'token_decoder_tokenizer': 'tokenizer json'})
+        self.assertEqual(train.TOKEN_DECODER_NEW_LR, 1e-4)
+        self.assertIs(train.SELECT_ON_DECODER, True)
+        self.assertEqual(train.DECODER_LABEL_SMOOTHING, 0.0)
+
+    def test_a_character_decoder_base_keeps_the_usual_settings(self):
+        self.configure({'decoder_type': 'char'})
+        self.assertEqual(train.TOKEN_DECODER_NEW_LR, 3e-4)
+        self.assertIs(train.SELECT_ON_DECODER, False)
+        self.assertEqual(train.DECODER_LABEL_SMOOTHING, 0.1)
+
+    def test_settings_the_run_names_win_over_the_base_defaults(self):
+        self.configure({'decoder_type': 'token', 'token_decoder_config': self.CONFIG,
+                        'token_decoder_tokenizer': 'tokenizer json'},
+                       TRAIN_TOKEN_DECODER_NEW_LR='2e-4', TRAIN_SELECT_ON_DECODER='0')
+        self.assertEqual(train.TOKEN_DECODER_NEW_LR, 2e-4)
+        self.assertIs(train.SELECT_ON_DECODER, False)
+        self.assertEqual(train.DECODER_LABEL_SMOOTHING, 0.0)
+
     def test_a_decoder_the_run_names_wins_over_the_base(self):
         self.configure({'decoder_type': 'token', 'token_decoder_config': self.CONFIG,
                         'token_decoder_tokenizer': 'tokenizer json'}, TRAIN_DECODER_TYPE='char')
