@@ -12,7 +12,7 @@ Output of a development checkpoint on four lines it was not trained on: a Kurren
 
 ```bash
 pip install -r requirements-inference.txt huggingface_hub
-hf download M2key1/deepocr-v3 --local-dir weights
+hf download M2key1/deepocr-v4 --local-dir weights
 ```
 
 ```python
@@ -20,15 +20,16 @@ from pathlib import Path
 import torch
 from PIL import Image
 import infer
-from infer import load_model, transcribe_beam
+from infer import load_model, transcribe, transcribe_beam
 
 infer.KENLM_PATH = Path('weights/union_bytes_v3.bin')
 infer.LM_DICT_PATH = Path('weights/union_bytes_v3.dict')
 infer.LM_WEIGHT = 1.0
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model, tokenizer = load_model('weights/deepocr-v3.pt', device)
-print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])
+model, tokenizer = load_model('weights/deepocr-v4.pt', device)
+print(transcribe(model, tokenizer, [Image.open('line.png')], device, use_decoder=True)[0])   # subword decoder, most accurate
+print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])                # CTC beam search with the KenLM, faster
 
 infer.CONVENTION = {'long_s': 1.0, 'oblique_hyphen': 1.0}   # diplomatic: ſ and ⸗ instead of s and -
 print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])
@@ -47,13 +48,15 @@ print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])
 2. Download the model (see Quickstart) and train from it:
 
    ```bash
-   TRAIN_SNAPSHOT=mydata TRAIN_BASE_CHECKPOINT=weights/deepocr-v3.pt TRAIN_EPOCHS=20 python train.py
+   TRAIN_SNAPSHOT=mydata TRAIN_BASE_CHECKPOINT=weights/deepocr-v4.pt TRAIN_EPOCHS=20 python train.py
    ```
+
+   A base with a subword decoder, such as v4, keeps it and fine-tunes with the settings it was trained with: cross-attention learning rate 1e-4, no label smoothing, and the best checkpoint picked on the decoder's reading. A `TRAIN_*` variable you set yourself overrides them.
 
    The run writes `runs/ocr_<timestamp>/best_model.pt`; `runs/latest_run` points at it.
    Multi-GPU: `torchrun --standalone --nproc_per_node=gpu train.py` with the same variables.
 
-3. Decode with v3's language model (the vocabulary is the same), or build one from your text:
+3. Decode with the model's language model (v3 and v4 share it and its vocabulary), or build one from your text:
 
    ```bash
    python build_kenlm.py --input mydata/train --out data/lm/mine --checkpoint runs/latest_run/best_model.pt
@@ -222,6 +225,8 @@ The same module is the Python API shown in the quickstart. Besides `transcribe_b
 
 <details>
 <summary><b>Pretrained model</b></summary>
+
+[DeepOCR v4](https://huggingface.co/M2key1/deepocr-v4) (Apache-2.0): v3 fine-tuned with the subword decoder, read with `transcribe(..., use_decoder=True)`. On unseen 19th-century handwritten letters it gets 4.6% of characters wrong, where v3 gets 9.4%.
 
 [DeepOCR v3](https://huggingface.co/M2key1/deepocr-v3) (Apache-2.0): the default architecture, trained from scratch on public datasets of historical print and handwriting, with its own KenLM. 3.0% CER on its validation split with beam search and the LM. To fine-tune it, see "Fine-tuning on your own lines".
 
