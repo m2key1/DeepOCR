@@ -29,7 +29,7 @@ infer.LM_WEIGHT = 1.0
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model, tokenizer = load_model('weights/deepocr-v4.pt', device)
 print(transcribe(model, tokenizer, [Image.open('line.png')], device, use_decoder=True)[0])   # subword decoder, most accurate
-print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])                # CTC beam search with the KenLM, faster
+print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])                # CTC beam search with the KenLM
 
 infer.CONVENTION = {'long_s': 1.0, 'oblique_hyphen': 1.0}   # diplomatic: ſ and ⸗ instead of s and -
 print(transcribe_beam(model, tokenizer, [Image.open('line.png')], device)[0])
@@ -226,7 +226,7 @@ The same module is the Python API shown in the quickstart. Besides `transcribe_b
 <details>
 <summary><b>Pretrained model</b></summary>
 
-[DeepOCR v4](https://huggingface.co/M2key1/deepocr-v4) (Apache-2.0): v3 fine-tuned with the subword decoder, read with `transcribe(..., use_decoder=True)`. On unseen 19th-century handwritten letters it gets 4.6% of characters wrong, where v3 gets 9.4%.
+[DeepOCR v4](https://huggingface.co/M2key1/deepocr-v4) (Apache-2.0): v3 fine-tuned with the subword decoder, read with `transcribe(..., use_decoder=True)`. On unseen handwritten letters from around 1900 it gets 4.6% of characters wrong, where v3 gets 9.4%.
 
 [DeepOCR v3](https://huggingface.co/M2key1/deepocr-v3) (Apache-2.0): the default architecture, trained from scratch on public datasets of historical print and handwriting, with its own KenLM. 3.0% CER on its validation split with beam search and the LM. To fine-tune it, see "Fine-tuning on your own lines".
 
