@@ -196,6 +196,25 @@ def _alto_bbox_polygon(textline: ET.Element) -> list[tuple[int, int]] | None:
     return [(int(x), int(y)), (int(x + w), int(y)), (int(x + w), int(y + h)), (int(x), int(y + h))]
 
 
+def _own_unicode(element: ET.Element) -> str | None:
+    for text_equiv in element:
+        if _local_tag(text_equiv) == 'TextEquiv':
+            for unicode in text_equiv:
+                if _local_tag(unicode) == 'Unicode' and unicode.text and unicode.text.strip():
+                    return unicode.text.strip()
+    return None
+
+
+def _page_line_text(textline: ET.Element) -> str | None:
+    """The TextLine's own TextEquiv, else its Words joined. Word TextEquivs come before the line's
+    in document order, so the first Unicode below a TextLine is often only its first word."""
+    own = _own_unicode(textline)
+    if own is not None:
+        return own
+    words = [_own_unicode(child) for child in textline if _local_tag(child) == 'Word']
+    return ' '.join(w for w in words if w) or None
+
+
 def extract_page_line_regions(
     xml_string: str
 ) -> tuple[str | None, list[tuple[str | None, list[tuple[int, int]], str]]]:
@@ -212,7 +231,7 @@ def extract_page_line_regions(
             image_filename = element.text.strip()                  # ALTO sourceImageInformation
         elif tag == 'TextLine':
             polygon = None
-            text = None
+            text = _page_line_text(element)
             strings = []
             for child in element.iter():
                 child_tag = _local_tag(child)
@@ -220,8 +239,6 @@ def extract_page_line_regions(
                     polygon = _parse_page_points(child.get('points'))      # PAGE
                 elif child_tag == 'Polygon' and polygon is None:
                     polygon = _parse_alto_polygon(child.get('POINTS'))     # ALTO Shape/Polygon
-                elif child_tag == 'Unicode' and text is None and child.text:
-                    text = child.text.strip()                              # PAGE
                 elif child_tag == 'String' and child.get('CONTENT') is not None:
                     strings.append(child.get('CONTENT'))                   # ALTO word/line token
             if text is None and strings:
@@ -619,11 +636,7 @@ def extract_xml_textlines(xml_string: str) -> list[str]:
     root = ET.fromstring(xml_string)
     namespace = {'page': 'http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15'}
 
-    return [
-        u.text
-        for line in root.findall('.//page:TextLine', namespace)
-        if (u := line.find('.//page:Unicode', namespace)) is not None and u.text
-    ]
+    return [text for line in root.findall('.//page:TextLine', namespace) if (text := _page_line_text(line))]
 
 
 def filter_single_line_pairs(pairs: list[tuple[Path, Path, str]]) -> list[tuple[Path, Path, str]]:
