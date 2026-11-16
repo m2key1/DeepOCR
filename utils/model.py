@@ -820,12 +820,11 @@ class DeepOCR(nn.Module):
 
     def _generate_span_mask(self, B, NumTokens, device):
         mask = torch.zeros((B, NumTokens), dtype=torch.bool, device=device)
+        if self.mask_ratio <= 0:
+            return mask
 
         num_masked_tokens = int(NumTokens * self.mask_ratio)
         num_spans = max(1, num_masked_tokens // max(1, self.span_length))
-
-        if num_spans == 0:
-            return mask
 
         max_start = max(1, NumTokens - self.span_length)
         start_indices = torch.randint(0, max_start, (B, num_spans), device=device)
