@@ -164,7 +164,7 @@ All hyperparameters are module-level constants at the top of `train.py`. Runtime
 
 | Variable | Effect |
 |---|---|
-| `OCR_BATCH` | Per-GPU batch size (learning rates scale with the square root of the effective batch) |
+| `OCR_BATCH` | Per-GPU batch size (learning rates scale with the square root of the effective batch, GPUs x batch x `GRAD_ACCUM_STEPS`; halving `OCR_BATCH` with `TRAIN_GRAD_ACCUM_STEPS=2` keeps the effective batch in less memory) |
 | `OCR_NUM_WORKERS` | Dataloader workers per rank |
 | `OCR_RESUME` | `auto`, a run directory or a checkpoint path; restores weights, EMA, optimizer, scheduler and epoch |
 | `OCR_LIMIT`, `OCR_VALID_LIMIT` | Cap the number of training / validation samples |

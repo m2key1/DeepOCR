@@ -456,7 +456,9 @@ class MoEBlock(nn.Module):
 
         if self.router_balance == 'loss_free':
             if self.training:
-                self._router_load = torch.bincount(flat_expert, minlength=self.num_experts).float()
+                # summed until the optimizer step, which may close a window of several batches
+                load = torch.bincount(flat_expert, minlength=self.num_experts).float()
+                self._router_load = load if self._router_load is None else self._router_load + load
             balance_loss = zero
             z_loss = zero
         else:
@@ -1555,7 +1557,8 @@ class DeepOCR(nn.Module):
         rescore_beta: float = 0.0,
         rescore_nbest: int = 8,
         resume_checkpoint: Optional[Path] = None,
-        scalar_log_interval: int = 50
+        scalar_log_interval: int = 50,
+        grad_accum_steps: int = 1
     ):
         self.to(device)
 
@@ -1588,7 +1591,8 @@ class DeepOCR(nn.Module):
             if scheduler is not None and resume_state.get('scheduler_state_dict') is not None:
                 scheduler.load_state_dict(resume_state['scheduler_state_dict'])
             start_epoch = resume_state['epoch']
-            global_step = resume_state.get('global_step', start_epoch * len(train_dataloader))
+            global_step = resume_state.get('global_step',
+                                           start_epoch * math.ceil(len(train_dataloader) / grad_accum_steps))
             best_cer = resume_state.get('best_cer', float('inf'))
             best_val_loss = resume_state.get('best_val_loss', float('inf'))
             rounds_since_best = resume_state.get('rounds_since_best', 0)
@@ -1674,7 +1678,11 @@ class DeepOCR(nn.Module):
                     input_lengths = input_lengths.to(device, non_blocking=True)
                     target_lengths = target_lengths.to(device, non_blocking=True)
 
-                    optimizer.zero_grad()
+                    window_start = batch_idx - batch_idx % grad_accum_steps
+                    window_size = min(grad_accum_steps, len(train_dataloader) - window_start)
+                    closes_window = batch_idx + 1 == window_start + window_size
+                    if batch_idx == window_start:
+                        optimizer.zero_grad()
 
                     if self.use_decoder:
                         decoder_input, decoder_target, tgt_key_padding_mask = self._build_decoder_io(
@@ -1713,13 +1721,17 @@ class DeepOCR(nn.Module):
                         loss = loss + (current_decoder_weight * ce_loss)
                         ce_loss_value = ce_loss.detach().item()
 
-                    loss.backward()
-                    grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)
-                    optimizer.step()
-                    self._update_router_biases()
-                    if scheduler is not None:
-                        scheduler.step()
-                    ema_model.update_parameters(self)
+                    # DDP reduces on every backward: no_sync fails under static_graph, and the share
+                    # a window already holds is the same on every rank, so the average stays exact
+                    (loss / window_size).backward()
+
+                    if closes_window:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)
+                        optimizer.step()
+                        self._update_router_biases()
+                        if scheduler is not None:
+                            scheduler.step()
+                        ema_model.update_parameters(self)
 
                     batch_loss_float = loss.detach().item()
 
@@ -1732,7 +1744,7 @@ class DeepOCR(nn.Module):
                     num_batches += 1
 
                     # full-rate curves are unreadable and dominate the event file
-                    if is_master and writer and global_step % scalar_log_interval == 0:
+                    if closes_window and is_master and writer and global_step % scalar_log_interval == 0:
                         writer.add_scalar('Loss/train_batch_total', batch_loss_float, global_step)
                         writer.add_scalar('Loss/train_batch_ctc', ctc_loss.detach().item(), global_step)
                         if self.use_decoder:
@@ -1764,7 +1776,8 @@ class DeepOCR(nn.Module):
                     if is_master and writer:
                         loop.set_postfix(loss=batch_loss_float, avg_loss=total_loss / num_batches)
 
-                    global_step += 1
+                    if closes_window:
+                        global_step += 1
 
                     if profile_mode and is_master:
                         prof.step()

@@ -136,6 +136,8 @@ SELECT_ON_DECODER = False
 BASE_BATCH_SIZE = 60
 # Per GPU, sized for the widest bucket on a 141 GB card.
 BATCH_SIZE = int(os.environ.get('OCR_BATCH', 80))
+# Batches summed into one optimizer step; the effective batch and its LR scaling count them.
+GRAD_ACCUM_STEPS = 1
 # The cosine schedule only anneals if the run finishes, so pick a count the job time limit allows.
 EPOCHS = 60
 BACKBONE_BASE_LR = 1e-4
@@ -234,7 +236,7 @@ if os.environ.get('TRAIN_LR'):
 # of its default. Unset or empty keeps the default. A per-group TRAIN_*_BASE_LR wins over
 # the shared TRAIN_LR above.
 APP_TUNABLES = (
-    'EPOCHS', 'WARMUP_EPOCHS', 'MIN_LR', 'WEIGHT_DECAY', 'EMA_DECAY',
+    'EPOCHS', 'GRAD_ACCUM_STEPS', 'WARMUP_EPOCHS', 'MIN_LR', 'WEIGHT_DECAY', 'EMA_DECAY',
     'BACKBONE_BASE_LR', 'TRANSFORMER_BASE_LR', 'DECODER_BASE_LR',
     'CTC_LOSS_WEIGHT', 'DECODER_LOSS_WEIGHT', 'CTC_ENTROPY_WEIGHT', 'DECODER_LABEL_SMOOTHING',
     'DECODER_EOS_WEIGHT', 'MOE_PENALTY', 'ROUTER_Z_LOSS_COEF',
@@ -434,7 +436,7 @@ def main():
     else:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    effective_batch_size = BATCH_SIZE * world_size
+    effective_batch_size = BATCH_SIZE * world_size * GRAD_ACCUM_STEPS
     k_factor = max(1, effective_batch_size // BASE_BATCH_SIZE)
 
     dynamic_backbone_lr = BACKBONE_BASE_LR * math.sqrt(k_factor)
@@ -466,7 +468,7 @@ def main():
 
     if is_master:
         print(f"Using device: {device} | World Size: {world_size}")
-        print(f"Per-GPU Batch: {BATCH_SIZE} | Effective Batch: {effective_batch_size}")
+        print(f"Per-GPU Batch: {BATCH_SIZE} | Accumulation: {GRAD_ACCUM_STEPS} | Effective Batch: {effective_batch_size}")
         print(f"Scaled Backbone LR: {dynamic_backbone_lr:.6f} | Scaled Transformer LR: {dynamic_transformer_lr:.6f}")
         log_dir.mkdir(parents=True, exist_ok=True)
         if log_dir.parent == Path('runs'):
@@ -728,7 +730,7 @@ def main():
                                    slow_group=optimizer.param_groups[1],
                                    fast_group=optimizer.param_groups[-1])
 
-    steps_per_epoch = len(train_dataloader)
+    steps_per_epoch = math.ceil(len(train_dataloader) / GRAD_ACCUM_STEPS)
     total_steps = EPOCHS * steps_per_epoch
     warmup_steps = int(WARMUP_EPOCHS * steps_per_epoch)
     scheduler = LambdaLR(optimizer, lr_lambda=[
@@ -775,7 +777,8 @@ def main():
         rescore_beta=RESCORE_BETA,
         rescore_nbest=RESCORE_NBEST,
         resume_checkpoint=resume_checkpoint,
-        scalar_log_interval=SCALAR_LOG_INTERVAL
+        scalar_log_interval=SCALAR_LOG_INTERVAL,
+        grad_accum_steps=GRAD_ACCUM_STEPS
     )
 
     if is_master and os.environ.get('TRAIN_OUTPUT'):
