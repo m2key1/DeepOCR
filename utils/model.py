@@ -1842,7 +1842,6 @@ class DeepOCR(nn.Module):
                         log_attention=True,
                         decoding_mode='both',
                         beam_width=beam_width,
-                        length_penalty=0.1,
                         blank_penalty=0.0,
                         debug=debug,
                         run_decoder=run_decoder_val,
@@ -2073,7 +2072,7 @@ class DeepOCR(nn.Module):
         log_attention: bool = False,
         decoding_mode: Literal['greedy', 'beam_search', 'both'] = 'greedy',
         beam_width: int = 10,
-        length_penalty: float = 0.1,
+        length_penalty: float = 0.0,
         blank_penalty: float = 0.0,
         debug: bool = False,
         run_decoder: bool = False,
@@ -2111,7 +2110,7 @@ class DeepOCR(nn.Module):
                 target_lengths = target_lengths.to(device)
                 attention_masks = attention_masks.to(device)
 
-                decoder_ids = None
+                decoder_texts = None
                 if conventions is not None:
                     conventions = conventions.to(device)
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
@@ -2130,9 +2129,7 @@ class DeepOCR(nn.Module):
                             print(f"  Validation loss calculation failed: {e}")
 
                     if run_decoder:
-                        decoder_ids = self.decode_autoregressive(
-                            memory, memory_key_padding_mask, max_len=decoder_max_len
-                        )
+                        decoder_texts = self.decode_text(memory, memory_key_padding_mask, max_len=decoder_max_len)
 
                     if debug and batch_idx == 0:
                         print("\n Log probs debug:")
@@ -2143,8 +2140,8 @@ class DeepOCR(nn.Module):
                         print(f"   Blank token ID: {self.tokenizer.blank_token_id}")
                         print(f"   Vocab size: {len(self.tokenizer)}")
 
-                if decoder_ids is not None:
-                    all_decoder_preds.extend(self._decoder_ids_to_text(decoder_ids))
+                if decoder_texts is not None:
+                    all_decoder_preds.extend(decoder_texts)
 
                 gt_sequences = torch.split(targets, target_lengths.tolist())
                 batch_ground_truths = self.tokenizer.batch_decode(gt_sequences, skip_special_tokens=True)
@@ -2372,7 +2369,7 @@ class DeepOCR(nn.Module):
         batch_size: int = 8,
         use_beam_search: bool = False,
         beam_width: int = 10,
-        length_penalty: float = 0.1,
+        length_penalty: float = 0.0,
         blank_penalty: float = 0.0,
         debug: bool = False,
         use_decoder: bool = False,
