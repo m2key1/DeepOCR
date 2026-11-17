@@ -1,4 +1,5 @@
 import json
+import random
 from collections import defaultdict
 from pathlib import Path
 
@@ -19,11 +20,13 @@ VALID_DIR = Path('data/valid')
 MANIFEST_PATH = Path('data/split_manifest.json')
 DATASET_SOURCES = []
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+# File names start with their corpus, so the sample is drawn at random rather than taken from the top.
 MAX_SAMPLES = 200
+SAMPLE_SEED = 0
 DECODER_MAX_LEN = 256
 RUN_GREEDY = True
 RUN_BEAM = True
-RUN_DECODER = False # adds almost nothing once the KenLM is fused into the beam
+RUN_DECODER = True # a subword decoder's own reading, the best one it gives
 RUN_RESCORED = False
 BEAM_WIDTH = 10
 RESCORE_BEAM_WIDTH = 4
@@ -161,18 +164,20 @@ def collect_samples() -> list[tuple[Path, str, str]]:
     manifest = json.loads(MANIFEST_PATH.read_text()) if MANIFEST_PATH.exists() else {}
     valid_sources = manifest.get('valid', {})
 
+    names = {path.name for path in VALID_DIR.iterdir()}
+    labelled = [path for path in sorted(VALID_DIR.iterdir()) if path.suffix.lower() in IMAGE_EXTENSIONS
+                and any(path.stem + suffix in names for suffix in ('.gt.txt', '.txt'))]
+    if len(labelled) > MAX_SAMPLES:
+        labelled = random.Random(SAMPLE_SEED).sample(labelled, MAX_SAMPLES)
+
     samples = []
-    for image_path in sorted(VALID_DIR.iterdir()):
-        if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
+    for image_path in labelled:
         ground_truth = read_ground_truth(image_path)
         if not ground_truth:
             continue
         source_path = valid_sources.get(image_path.stem, str(image_path))
         label = derive_dataset_label(source_path, DATASET_SOURCES)
         samples.append((image_path, ground_truth, label))
-        if len(samples) >= MAX_SAMPLES:
-            break
     return samples
 
 
