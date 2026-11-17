@@ -818,6 +818,10 @@ class DeepOCR(nn.Module):
         for layer in self.transformer_layers:
             layer.moe_block.update_router_bias()
 
+    def _discard_router_load(self):
+        for layer in self.transformer_layers:
+            layer.moe_block._router_load = None
+
     def _generate_span_mask(self, B, NumTokens, device):
         mask = torch.zeros((B, NumTokens), dtype=torch.bool, device=device)
         if self.mask_ratio <= 0:
@@ -1726,11 +1730,18 @@ class DeepOCR(nn.Module):
 
                     if closes_window:
                         grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)
-                        optimizer.step()
-                        self._update_router_biases()
-                        if scheduler is not None:
-                            scheduler.step()
-                        ema_model.update_parameters(self)
+                        # every rank holds the same reduced gradient, so every rank skips together
+                        if torch.isfinite(grad_norm):
+                            optimizer.step()
+                            self._update_router_biases()
+                            if scheduler is not None:
+                                scheduler.step()
+                            ema_model.update_parameters(self)
+                        else:
+                            self._discard_router_load()
+                            if is_master:
+                                print(f"Warning: skipped a step with a non-finite gradient at epoch {epoch+1}, "
+                                      f"batch {batch_idx}")
 
                     batch_loss_float = loss.detach().item()
 
