@@ -57,7 +57,7 @@ CANONICAL_MAP = {
 #   ꝑ ꝓ ꝗ ꝙ ꝯ ꝝ ꝰ ẜ    scribal abbreviations; U+A770 'ꝰ' has NFKD 'ꝯ', one abbreviation
 #                       decomposing into another, so blanket compatibility folding is unsafe
 #   ᵃᶜᵈᵉⁱⁿᵒˢᵗᵘ          superscript modifiers: abbreviation devices, not allographs
-#   ¹²³ ½ ¼ ¾          footnote markers and fractions, semantically real
+#   ½ ¼ ¾              fractions, semantically real (superscript digits are folded above)
 _CANONICAL_TABLE = str.maketrans(CANONICAL_MAP)
 
 # A lookalike typed into a Latin word is a typo; in a Cyrillic word it is the letter itself.
