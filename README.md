@@ -78,13 +78,13 @@ First-choice expert per column on a printed line, one colour per expert, layer b
 
 ![Convention flags](assets/conventions.png)
 
-The same checkpoint with the long-s flag on and off. Corpora disagree about the long s, the line-break hyphen `⸗` and typographic punctuation, so each line trains with its corpus's three flags and you pick the flags at inference.
+The same checkpoint with the long-s flag on and off. Corpora disagree about the long s, the line-break hyphen `⸗` and typographic punctuation, so each line trains with its corpus's flags and you pick the flags at inference. v4 has a fourth, `expand_abbreviations`, for corpora that write abbreviations out.
 
 ## The whole model
 
 ![DeepOCR pipeline](assets/figure1_pipeline.png)
 
-170.5M parameters; 8 of 64 experts plus the shared one run per column. Every architecture setting is stored in the checkpoint, so a checkpoint still loads after `train.py`'s constants change.
+DeepOCR v4 has 459.0M parameters, 305.6M of them in the subword decoder; the default `train.py` recipe, with the character decoder, has 170.5M. 8 of 64 experts plus the shared one run per column. Every architecture setting is stored in the checkpoint, so a checkpoint still loads after `train.py`'s constants change.
 
 <details>
 <summary><b>Architecture at a glance</b></summary>
@@ -94,7 +94,7 @@ The same checkpoint with the long-s flag on and off. Corpora disagree about the 
 | Input | RGB line image, height 256, width up to 6144 px (width-bucketed batching) |
 | Backbone | `cnn_grouped` (default, 4.2M params, grouped 3x3 blocks, stride 32 in height and 8 in width). `cnn`, `dinov3` and `trocr` are selectable; the last two need `transformers` |
 | Encoder | 4 MoE transformer layers, d_model 512, 8 heads. 62 SwiGLU experts plus 2 convolutional ones, top-8 routing, 1 shared expert, loss-free bias balancing, DropPath, span masking during training. |
-| Conditioning | Per-line flags for long s, the Fraktur oblique hyphen and typographic punctuation, measured per corpus by `scripts/audit_conventions.py`; `CONVENTION` in `infer.py` picks which convention to emit |
+| Conditioning | Per-line flags for long s, the Fraktur oblique hyphen and typographic punctuation (v4 adds written-out abbreviations), measured per corpus by `scripts/audit_conventions.py`; `CONVENTION` in `infer.py` picks which convention to emit |
 | CTC head | Linear + log-softmax, CTC loss with entropy smoothing |
 | Decoder | 4-layer transformer decoder (teacher-forced cross-entropy, label smoothing), optionally initialised from a pretrained character LM. Or a subword decoder (`DECODER_TYPE = 'token'`): an OLMo 3 language model that reads the encoder through new cross-attention layers |
 | Vocabulary | Byte-level: 5 specials + 256 byte values, token id = 5 + byte |
