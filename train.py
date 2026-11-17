@@ -127,7 +127,8 @@ TOKEN_DECODER_NEW_LR = 3e-4
 TOKEN_DECODER_INPUT_NOISE = 0.1
 # A base whose token decoder is already trained fine-tunes with the settings it was trained with;
 # a TRAIN_* value the run sets itself still wins.
-TOKEN_BASE_FINETUNE = {'TOKEN_DECODER_NEW_LR': 1e-4, 'SELECT_ON_DECODER': True, 'DECODER_LABEL_SMOOTHING': 0.0}
+TOKEN_BASE_FINETUNE = {'TOKEN_DECODER_NEW_LR': 1e-4, 'SELECT_ON_DECODER': True, 'DECODER_LABEL_SMOOTHING': 0.0,
+                       'DECODER_DROPOUT': 0.0}
 # Trains the decoder alone; the CTC head and the encoder it reads stay exactly as warm-started.
 FREEZE_ENCODER = False
 SAVE_BEST_OF_HEADS = False

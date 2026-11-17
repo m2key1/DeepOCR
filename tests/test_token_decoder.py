@@ -76,6 +76,24 @@ class MatchesTheReference(unittest.TestCase):
     def test_byte_lengths_count_text_tokens_and_skip_specials(self):
         self.assertEqual(self.decoder.token_bytes.tolist(), [0, 0, 4, 6, 5, 6])
 
+    def test_dropout_acts_while_training_and_not_while_reading(self):
+        decoder = TokenDecoder.from_pretrained_lm(Path(self.folder.name), MEMORY_DIM, dropout=0.5)
+        input_ids = torch.tensor([[0, 2, 4, 3], [0, 5, 2, 2]])
+        with torch.no_grad():
+            expected = self.reference(input_ids=input_ids).logits
+            training = decoder.train()(self.memory, None, input_ids)
+            reading = decoder.eval()(self.memory, None, input_ids)
+        self.assertFalse(torch.allclose(training, expected, atol=1e-3))
+        self.assertTrue(torch.allclose(reading, expected, atol=1e-5))
+
+    def test_the_model_hands_its_decoder_dropout_to_the_token_decoder(self):
+        model = DeepOCR(tokenizer=DeepTokenizer(normalize_unicode=True, verbose=False), backbone_name='cnn_grouped',
+                        cnn_width_stride=8, cnn_patch_size=32, target_height=64, use_2d_structure=False,
+                        num_experts=4, top_k_experts=2, expert_ffn='swiglu', expert_hidden=32,
+                        router_balance='loss_free', num_encoder_layers=1, use_decoder=True, decoder_dropout=0.3,
+                        decoder_type='token', token_decoder_lm_path=Path(self.folder.name))
+        self.assertEqual([layer.dropout.p for layer in model.decoder.layers], [0.3, 0.3])
+
 
 class InputsAndTargets(unittest.TestCase):
     def test_lines_start_after_eos_and_end_with_it(self):
@@ -223,12 +241,14 @@ class FineTuneKeepsTheBaseDecoder(unittest.TestCase):
         self.assertEqual(train.TOKEN_DECODER_NEW_LR, 1e-4)
         self.assertIs(train.SELECT_ON_DECODER, True)
         self.assertEqual(train.DECODER_LABEL_SMOOTHING, 0.0)
+        self.assertEqual(train.DECODER_DROPOUT, 0.0)
 
     def test_a_character_decoder_base_keeps_the_usual_settings(self):
         self.configure({'decoder_type': 'char'})
         self.assertEqual(train.TOKEN_DECODER_NEW_LR, 3e-4)
         self.assertIs(train.SELECT_ON_DECODER, False)
         self.assertEqual(train.DECODER_LABEL_SMOOTHING, 0.1)
+        self.assertEqual(train.DECODER_DROPOUT, 0.1)
 
     def test_settings_the_run_names_win_over_the_base_defaults(self):
         self.configure({'decoder_type': 'token', 'token_decoder_config': self.CONFIG,

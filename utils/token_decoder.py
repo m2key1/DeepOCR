@@ -113,32 +113,33 @@ class MLP(nn.Module):
 class DecoderLayer(nn.Module):
     """OLMo 3 normalizes each sublayer's output rather than its input; cross-attention sits between the two."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, dropout: float = 0.0):
         super().__init__()
         self.self_attn = SelfAttention(config)
         self.post_attention_layernorm = RMSNorm(config['hidden_size'], config['rms_norm_eps'])
         self.cross_attn = CrossAttention(config)
         self.mlp = MLP(config)
         self.post_feedforward_layernorm = RMSNorm(config['hidden_size'], config['rms_norm_eps'])
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, hidden, cos, sin, memory_kv, memory_attend_mask, cache=None):
-        hidden = hidden + self.post_attention_layernorm(self.self_attn(hidden, cos, sin, cache))
-        hidden = hidden + self.cross_attn(hidden, *memory_kv, memory_attend_mask)
-        return hidden + self.post_feedforward_layernorm(self.mlp(hidden))
+        hidden = hidden + self.dropout(self.post_attention_layernorm(self.self_attn(hidden, cos, sin, cache)))
+        hidden = hidden + self.dropout(self.cross_attn(hidden, *memory_kv, memory_attend_mask))
+        return hidden + self.dropout(self.post_feedforward_layernorm(self.mlp(hidden)))
 
 
 class TokenDecoder(nn.Module):
     """A pretrained subword LM that reads the OCR encoder through cross-attention. Its text is NFC, the
     form the LM was trained on; callers convert to and from DeepOCR's canonical form."""
 
-    def __init__(self, config: dict, tokenizer_json: str, memory_dim: int):
+    def __init__(self, config: dict, tokenizer_json: str, memory_dim: int, dropout: float = 0.0):
         super().__init__()
         self.config = {key: config[key] for key in LM_CONFIG_KEYS}
         self.tokenizer_json = tokenizer_json
         self.tokenizer = Tokenizer.from_str(tokenizer_json)
         hidden = config['hidden_size']
         self.embed_tokens = nn.Embedding(config['vocab_size'], hidden)
-        self.layers = nn.ModuleList(DecoderLayer(self.config) for _ in range(config['num_hidden_layers']))
+        self.layers = nn.ModuleList(DecoderLayer(self.config, dropout) for _ in range(config['num_hidden_layers']))
         self.norm = RMSNorm(hidden, config['rms_norm_eps'])
         self.memory_proj = nn.Linear(memory_dim, hidden)
         head_dim = hidden // config['num_attention_heads']
@@ -156,12 +157,12 @@ class TokenDecoder(nn.Module):
         return lengths
 
     @classmethod
-    def from_pretrained_lm(cls, lm_dir: Path, memory_dim: int) -> 'TokenDecoder':
+    def from_pretrained_lm(cls, lm_dir: Path, memory_dim: int, dropout: float = 0.0) -> 'TokenDecoder':
         """Reads an OLMo 3 checkpoint directory (config.json, model.safetensors, tokenizer.json)."""
         lm_dir = Path(lm_dir)
         hf_config = json.loads((lm_dir / 'config.json').read_text(encoding='utf-8'))
         hf_config['rope_theta'] = hf_config.get('rope_parameters', {}).get('rope_theta', hf_config.get('rope_theta'))
-        decoder = cls(hf_config, (lm_dir / 'tokenizer.json').read_text(encoding='utf-8'), memory_dim)
+        decoder = cls(hf_config, (lm_dir / 'tokenizer.json').read_text(encoding='utf-8'), memory_dim, dropout)
         state = {key.removeprefix('_orig_mod.').removeprefix('model.'): value
                  for key, value in load_file(lm_dir / 'model.safetensors').items()}
         state.pop('lm_head.weight', None)

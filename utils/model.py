@@ -759,9 +759,11 @@ class DeepOCR(nn.Module):
         if self.use_decoder and decoder_type == 'token':
             # a subword LM decoder: its own vocabulary and text form, reading the encoder via cross-attention
             if token_decoder_lm_path is not None:
-                self.decoder = TokenDecoder.from_pretrained_lm(Path(token_decoder_lm_path), self.d_model)
+                self.decoder = TokenDecoder.from_pretrained_lm(Path(token_decoder_lm_path), self.d_model,
+                                                               decoder_dropout)
             else:
-                self.decoder = TokenDecoder(token_decoder_config, token_decoder_tokenizer, self.d_model)
+                self.decoder = TokenDecoder(token_decoder_config, token_decoder_tokenizer, self.d_model,
+                                            decoder_dropout)
             self.decoder_pad_id = TOKEN_DECODER_PAD_ID
             ce_class_weight = torch.ones(self.decoder.vocab_size)
             ce_class_weight[TOKEN_DECODER_END_ID] = decoder_eos_weight
