@@ -1,6 +1,7 @@
 import collections
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -16,6 +17,17 @@ MARKED_RATIO = 0.10
 OUT_PATH = Path('data/conventions.json')
 # A corpus gets a flag when it writes the diplomatic form on more than MARKED_RATIO of its occurrences.
 FLAGS = {name: (convention.marked, convention.plain) for name, convention in CONVENTIONS.items()}
+# A hyphen inside a word has no typographic form; only a dash, free-standing or between digits,
+# could have been printed as '–'.
+PLAIN_DASH = re.compile(r'(?<!\S)-(?!\S)|(?<=\d)-(?=\d)')
+
+
+def count_marks(flag: str, text: str) -> tuple[int, int]:
+    marked, plain = FLAGS[flag]
+    marked_count = sum(text.count(c) for c in marked)
+    if flag != 'typographic_punctuation':
+        return marked_count, sum(text.count(c) for c in plain)
+    return marked_count, sum(text.count(c) for c in plain if c != '-') + len(PLAIN_DASH.findall(text))
 
 
 def iter_labelled_texts():
@@ -46,9 +58,10 @@ def main():
     for label, text in iter_labelled_texts():
         bucket = counts[label]
         bucket['lines'] += 1
-        for flag, (marked, plain) in FLAGS.items():
-            bucket[flag] += sum(text.count(c) for c in marked)
-            bucket[f'{flag}_plain'] += sum(text.count(c) for c in plain)
+        for flag in FLAGS:
+            marked, plain = count_marks(flag, text)
+            bucket[flag] += marked
+            bucket[f'{flag}_plain'] += plain
 
     table = {}
     print(f"\n{'dataset label':<42} {'lines':>8}  " + '  '.join(f'{f:>24}' for f in FLAGS))
