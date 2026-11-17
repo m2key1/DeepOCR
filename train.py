@@ -37,16 +37,18 @@ torch.backends.cuda.enable_cudnn_sdp(False)
 # 'cnn' is slower than 'cnn_grouped' at similar size: its depthwise pair is memory-bound on a GPU.
 # 'dinov3' and 'trocr' are why transformers is a dependency.
 BACKBONE = 'cnn_grouped'
+CNN_BACKBONES = ('cnn', 'cnn_grouped')
 CNN_WIDTH_STRIDE = 8
 FREEZE_BACKBONE = False
-# 256 / 32 keeps eight feature rows, so the extra detail is spent in the backbone.
-PATCH_SIZE = 32
+# 256 / 32 keeps eight feature rows, so the extra detail is spent in the backbone. A pretrained
+# transformer backbone brings its own 16-pixel patch.
+PATCH_SIZE = 32 if BACKBONE in CNN_BACKBONES else 16
 TARGET_HEIGHT = 256
 # The dataset caps the aspect-preserved width here and squashes anything wider, so the cap has
 # to scale with the height or doubling TARGET_HEIGHT silently distorts every long line.
 MAX_WIDTH = 24 * TARGET_HEIGHT
 USE_2D_STRUCTURE = False
-WIDTH_STRIDE = CNN_WIDTH_STRIDE if BACKBONE in ('cnn', 'cnn_grouped') else PATCH_SIZE
+WIDTH_STRIDE = CNN_WIDTH_STRIDE if BACKBONE in CNN_BACKBONES else PATCH_SIZE
 PRETRAIN_WEIGHTS = None # Path to a best_model.pt to warm-start from; TRAIN_BASE_CHECKPOINT overrides it.
 # '' = off, 'auto' = this run's dir or runs/latest_run if a last_checkpoint.pt exists, else a run
 # dir or checkpoint path. Resuming reuses the original run dir and skips PRETRAIN_WEIGHTS.
@@ -397,6 +399,14 @@ def get_transforms() -> tuple[A.Compose, A.Compose]:
     return train_transform, val_transform
 
 
+def check_strides(model, patch_size: int, width_stride: int) -> None:
+    """The datasets drop lines whose text needs more columns than these strides give, so they must
+    be the model's own."""
+    if (model.patch_size, model.patch_size_w) != (patch_size, width_stride):
+        raise ValueError(f"The datasets assume {patch_size} x {width_stride} pixel patches, but the model reads "
+                         f"{model.patch_size} x {model.patch_size_w}; set PATCH_SIZE and WIDTH_STRIDE to match.")
+
+
 def make_lr_lambda(base_lr: float, warmup_steps: int, total_steps: int, min_lr: float):
     def lr_lambda(step: int) -> float:
         # step + 1 because LambdaLR evaluates lambda(0) at construction; avoids a zero first LR
@@ -595,6 +605,7 @@ def main():
         batch_independent_backbone=BATCH_INDEPENDENT_BACKBONE,
     ).to(device)
 
+    check_strides(model, PATCH_SIZE, WIDTH_STRIDE)
     if FREEZE_ENCODER:
         model.freeze_encoder()
     if DECODER_TYPE == 'token':
