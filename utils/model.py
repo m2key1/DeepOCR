@@ -678,6 +678,9 @@ class DeepOCR(nn.Module):
         self.span_length = int(self.grid_height)
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.d_model))
+        # Training-only choices, set by train.py; off reproduces the original recipe.
+        self.mask_keeps_position = False
+        self.decoder_reads_unmasked = False
         nn.init.normal_(self.mask_token, mean=0, std=0.02)
 
         if self.use_2d_structure:
@@ -890,7 +893,8 @@ class DeepOCR(nn.Module):
                 x: torch.Tensor,
                 attention_masks: Optional[torch.Tensor] = None,
                 return_attention: bool = False,
-                conventions: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, torch.Tensor], Dict]:
+                conventions: Optional[torch.Tensor] = None,
+                unmasked_memory: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, torch.Tensor], Dict]:
 
         B = x.size(0)
         x = normalize_images(x)
@@ -909,15 +913,12 @@ class DeepOCR(nn.Module):
             # [B, H, W, D] -> [B, W, H, D]
             feature_grid = feature_grid.transpose(1, 2)
             sequence = feature_grid.reshape(B, grid_width * self.grid_height, self.feature_dim)
-            sequence = self.feature_projection(sequence)
-            sequence = self.pos_encoder(sequence, height=self.grid_height, width=grid_width)
-            projected_sequence = sequence.transpose(0, 1)    # [Seq_Len, B, d_model]
+            features = self.feature_projection(sequence).transpose(0, 1)    # [Seq_Len, B, d_model]
             seq_len = grid_width * self.grid_height
         else:
             sequence = feature_grid.permute(2, 0, 1, 3)    # [W, B, H, D]
             sequence_features = sequence.reshape(grid_width, B, self.grid_height * self.feature_dim)
-            projected_sequence = self.feature_projection(sequence_features)
-            projected_sequence = self.pos_encoder(projected_sequence)    # [Seq_Len, B, d_model]
+            features = self.feature_projection(sequence_features)    # [Seq_Len, B, d_model]
             seq_len = grid_width
 
         if attention_masks is not None:
@@ -926,33 +927,67 @@ class DeepOCR(nn.Module):
                     f"Attention mask shape mismatch! Expected [{B}, {seq_len}], got {attention_masks.shape}."
                 )
 
-        if self.convention_proj is not None and conventions is not None:
-            # one vector added to every column, so both heads are conditioned
-            projected_sequence = projected_sequence + self.convention_proj(
-                conventions.to(projected_sequence.dtype)).unsqueeze(0)
-
         active_span_mask = None
-
+        hidden = None
         if getattr(self, 'use_span_mask', False):
-            generated_mask = None
-
             masking = self.training and not self.encoder_frozen
             if masking or return_attention:
-                generated_mask = self._generate_span_mask(B, seq_len, projected_sequence.device)
-                active_span_mask = generated_mask
+                active_span_mask = self._generate_span_mask(B, seq_len, features.device)
+            if masking:
+                hidden = active_span_mask
 
-            if masking and generated_mask is not None:
-                x_t = projected_sequence.transpose(0, 1)
-                mask_token_expanded = self.mask_token.expand(B, seq_len, self.d_model)
-                x_masked = torch.where(generated_mask.unsqueeze(-1), mask_token_expanded, x_t)
-                projected_sequence = x_masked.transpose(0, 1)
+        if hidden is not None and self.mask_keeps_position:
+            projected_sequence = self._place(self._hide(features, hidden), grid_width, conventions)
+        else:
+            projected_sequence = self._place(features, grid_width, conventions)
+            if hidden is not None:
+                projected_sequence = self._hide(projected_sequence, hidden)
 
-        encoded_sequence = projected_sequence
+        memory, memory_key_padding_mask, aux_losses, encoded_sequence, expert_assignments = self._run_layers(
+            projected_sequence, attention_masks, return_attention, B, seq_len, grid_width)
 
+        unmasked = None
+        if hidden is not None and unmasked_memory:
+            unmasked, _, unmasked_losses, _, _ = self._run_layers(
+                self._place(features, grid_width, conventions), attention_masks, False, B, seq_len, grid_width)
+            aux_losses['total'] = aux_losses['total'] + unmasked_losses['total']
+            aux_losses['z_total'] = aux_losses['z_total'] + unmasked_losses['z_total']
+
+        enc_state = {
+            'B': B,
+            'grid_width': grid_width,
+            'seq_len': seq_len,
+            'projected_sequence': projected_sequence,
+            'encoded_sequence': encoded_sequence,
+            'active_span_mask': active_span_mask,
+            'expert_assignments': expert_assignments,
+            'unmasked_memory': unmasked,
+        }
+
+        return memory, memory_key_padding_mask, aux_losses, enc_state
+
+    def _place(self, features: torch.Tensor, grid_width: int, conventions: Optional[torch.Tensor]) -> torch.Tensor:
+        """Positions and convention flags added to [Seq_Len, B, d_model] features."""
+        if self.use_2d_structure:
+            placed = self.pos_encoder(features.transpose(0, 1), height=self.grid_height, width=grid_width)
+            placed = placed.transpose(0, 1)
+        else:
+            placed = self.pos_encoder(features)
+        if self.convention_proj is not None and conventions is not None:
+            # one vector added to every column, so both heads are conditioned
+            placed = placed + self.convention_proj(conventions.to(placed.dtype)).unsqueeze(0)
+        return placed
+
+    def _hide(self, sequence: torch.Tensor, span_mask: torch.Tensor) -> torch.Tensor:
+        return torch.where(span_mask.transpose(0, 1).unsqueeze(-1), self.mask_token.to(sequence.dtype), sequence)
+
+    def _run_layers(self, sequence: torch.Tensor, attention_masks: Optional[torch.Tensor], return_attention: bool,
+                    B: int, seq_len: int, grid_width: int):
         aux_losses = {}
-        total_aux_loss = torch.tensor(0.0, device=projected_sequence.device)
-        total_z_loss = torch.tensor(0.0, device=projected_sequence.device)
+        total_aux_loss = torch.tensor(0.0, device=sequence.device)
+        total_z_loss = torch.tensor(0.0, device=sequence.device)
         expert_assignments = []
+        encoded_sequence = sequence
 
         for i, layer in enumerate(self.transformer_layers):
             encoded_sequence, balance_loss, z_loss, topk_indices = layer(encoded_sequence, src_key_padding_mask=attention_masks)
@@ -979,18 +1014,7 @@ class DeepOCR(nn.Module):
         else:
             memory = encoded_sequence
             memory_key_padding_mask = attention_masks
-
-        enc_state = {
-            'B': B,
-            'grid_width': grid_width,
-            'seq_len': seq_len,
-            'projected_sequence': projected_sequence,
-            'encoded_sequence': encoded_sequence,
-            'active_span_mask': active_span_mask,
-            'expert_assignments': expert_assignments,
-        }
-
-        return memory, memory_key_padding_mask, aux_losses, enc_state
+        return memory, memory_key_padding_mask, aux_losses, encoded_sequence, expert_assignments
 
     def forward(self,
                 x: torch.Tensor,
@@ -1001,9 +1025,11 @@ class DeepOCR(nn.Module):
                 conventions: Optional[torch.Tensor] = None
                 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor], Optional[torch.Tensor]]:
 
+        decoding = self.use_decoder and decoder_targets is not None
         with torch.no_grad() if self.encoder_frozen else nullcontext():
             memory, memory_key_padding_mask, aux_losses, enc_state = self._encode(
-                x, attention_masks, return_attention, conventions)
+                x, attention_masks, return_attention, conventions,
+                unmasked_memory=decoding and self.decoder_reads_unmasked)
 
         B = enc_state['B']
         grid_width = enc_state['grid_width']
@@ -1077,9 +1103,11 @@ class DeepOCR(nn.Module):
                 viz_outputs[f'expert_routing_layer_{i}'] = seq_to_grid(assignment.float())
 
         decoder_logits = None
-        if self.use_decoder and decoder_targets is not None:
+        if decoding:
+            # with DECODER_READS_UNMASKED the decoder never learns to write over columns it cannot see
+            decoder_memory = enc_state['unmasked_memory'] if enc_state['unmasked_memory'] is not None else memory
             decoder_logits = self._decode_teacher_forced(
-                memory, memory_key_padding_mask, decoder_targets, decoder_tgt_key_padding_mask
+                decoder_memory, memory_key_padding_mask, decoder_targets, decoder_tgt_key_padding_mask
             )
 
         return log_probs, aux_losses, viz_outputs, decoder_logits

@@ -62,6 +62,13 @@ DROP_PATH = 0.1
 # curriculum: read mostly visible lines first, then hide more as the encoder learns to use context
 MASK_RATIO = 0.1
 MASK_RATIO_FINAL = 0.3
+# A masked column keeps its position and convention flags; only its content is hidden.
+MASK_KEEPS_POSITION = True
+# The decoder learns from an unmasked pass of the encoder, so it is never rewarded for writing text
+# over columns it cannot see. Costs a second encoder pass per step.
+DECODER_READS_UNMASKED = True
+# Share of training lines turned upside down or blanked to bare paper, with an empty target.
+NEGATIVE_LINE_PROB = 0.03
 MOE_PENALTY = 0.05           # inert while ROUTER_BALANCE is 'loss_free'
 NUM_ENCODER_LAYERS = 4
 NUM_EXPERTS = int(os.environ.get('OCR_EXPERTS', 62)) # routed FFN experts; 1 = dense ablation
@@ -246,6 +253,7 @@ APP_TUNABLES = (
     'EXPERT_FFN', 'EXPERT_HIDDEN', 'NUM_SHARED_EXPERTS', 'ROUTER_BALANCE', 'ROUTER_BIAS_RATE',
     'NUM_CONV_EXPERTS', 'CONV_EXPERT_KERNEL',
     'DROP_PATH', 'DECODER_DROPOUT', 'MASK_RATIO', 'MASK_RATIO_FINAL', 'DISABLE_AUG_AFTER_EPOCH',
+    'MASK_KEEPS_POSITION', 'DECODER_READS_UNMASKED', 'NEGATIVE_LINE_PROB',
     'VALID_LIMIT', 'VAL_FREQUENCY', 'BEAM_VAL_FREQUENCY', 'DECODER_VAL_FREQUENCY', 'BEAM_WIDTH',
     'SCALAR_LOG_INTERVAL',
     'SELECT_ON_DECODER', 'SAVE_BEST_OF_HEADS',
@@ -526,7 +534,8 @@ def main():
         dataset_sources=DATASET_SOURCES,
         exclude_datasets=DROP_DATASETS,
         label_overrides=LABEL_OVERRIDES,
-        conventions=train_conventions
+        conventions=train_conventions,
+        negative_prob=NEGATIVE_LINE_PROB
     )
 
     valid_dataset = OCRDataset(
@@ -606,6 +615,8 @@ def main():
     ).to(device)
 
     check_strides(model, PATCH_SIZE, WIDTH_STRIDE)
+    model.mask_keeps_position = MASK_KEEPS_POSITION
+    model.decoder_reads_unmasked = DECODER_READS_UNMASKED
     if FREEZE_ENCODER:
         model.freeze_encoder()
     if DECODER_TYPE == 'token':

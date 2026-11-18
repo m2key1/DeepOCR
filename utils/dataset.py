@@ -181,10 +181,12 @@ class OCRDataset(Dataset):
         dataset_sources: list[str] = [],
         exclude_datasets: list[str] = [],
         label_overrides: Optional[dict] = None,
-        conventions: Optional[ConventionTable] = None
+        conventions: Optional[ConventionTable] = None,
+        negative_prob: float = 0.0
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
+        self.negative_prob = negative_prob
         self.tokenizer = tokenizer
         self.image_extensions = image_extensions
         self.limit = limit
@@ -455,6 +457,8 @@ class OCRDataset(Dataset):
                     target_tensor = torch.tensor(self.tokenizer.encode(sampled_text), dtype=torch.long)
                     if self._capacity(self.sample_widths[idx]) < len(target_tensor):
                         return None
+            if self.negative_prob and random.random() < self.negative_prob:
+                image, target_tensor = negative_line(image), torch.tensor([], dtype=torch.long)
             if augmentations:
                 image = augmentations(image=image)['image']
             return image, target_tensor, label, flags
@@ -480,11 +484,22 @@ class OCRDataset(Dataset):
 
         image = image.resize((new_width, self.target_height), Image.Resampling.LANCZOS)
         image = np.array(image)
+        if self.negative_prob and random.random() < self.negative_prob:
+            image, target = negative_line(image), []
 
         if augmentations:
             image = augmentations(image=image)['image']
 
         return image, torch.tensor(target, dtype=torch.long), label, flags
+
+
+def negative_line(image: np.ndarray) -> np.ndarray:
+    """A crop that holds no text the right way up, so its reading is empty: the line turned upside
+    down, or bare paper in the line's own colour. Teaches the decoder that it may not invent text."""
+    if random.random() < 0.5:
+        return np.ascontiguousarray(image[::-1, ::-1])
+    paper = np.median(image.reshape(-1, image.shape[-1]), axis=0).astype(image.dtype)
+    return np.broadcast_to(paper, image.shape).copy()
 
 def corpus_epoch_indices(labels: list[str], alpha: float, max_repeat: int, epoch: int, seed: int,
                          weights: Optional[dict[str, float]] = None) -> list[int]:
