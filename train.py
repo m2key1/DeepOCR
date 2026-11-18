@@ -155,6 +155,9 @@ CTC_ENTROPY_WEIGHT = 0.1
 DECODER_BASE_LR = 1e-4
 DISABLE_AUG_AFTER_EPOCH = None
 EMA_DECAY = 0.999
+# The decay grows with the update count, min(EMA_DECAY, (1 + n) / (10 + n)), so a short fine-tune
+# saves its own weights rather than mostly its base's.
+EMA_WARMUP = True
 MIN_LR = 1e-6
 TRANSFORMER_BASE_LR = 1e-4
 WARMUP_EPOCHS = 1.0
@@ -246,7 +249,7 @@ if os.environ.get('TRAIN_LR'):
 # of its default. Unset or empty keeps the default. A per-group TRAIN_*_BASE_LR wins over
 # the shared TRAIN_LR above.
 APP_TUNABLES = (
-    'EPOCHS', 'GRAD_ACCUM_STEPS', 'WARMUP_EPOCHS', 'MIN_LR', 'WEIGHT_DECAY', 'EMA_DECAY',
+    'EPOCHS', 'GRAD_ACCUM_STEPS', 'WARMUP_EPOCHS', 'MIN_LR', 'WEIGHT_DECAY', 'EMA_DECAY', 'EMA_WARMUP',
     'BACKBONE_BASE_LR', 'TRANSFORMER_BASE_LR', 'DECODER_BASE_LR',
     'CTC_LOSS_WEIGHT', 'DECODER_LOSS_WEIGHT', 'CTC_ENTROPY_WEIGHT', 'DECODER_LABEL_SMOOTHING',
     'DECODER_EOS_WEIGHT', 'MOE_PENALTY', 'ROUTER_Z_LOSS_COEF',
@@ -795,6 +798,7 @@ def main():
         select_on_decoder=SELECT_ON_DECODER,
         save_best_of_heads=SAVE_BEST_OF_HEADS,
         ema_decay=EMA_DECAY,
+        ema_warmup=EMA_WARMUP,
         mask_ratio_final=MASK_RATIO_FINAL,
         rescore_alpha=RESCORE_ALPHA,
         rescore_beta=RESCORE_BETA,

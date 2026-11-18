@@ -58,6 +58,20 @@ def normalize_images(images: torch.Tensor) -> torch.Tensor:
     return (images.float() / 255.0 - mean) / std
 
 
+def ema_with_warmup(decay: float):
+    """An EMA whose decay grows with the number of updates, min(decay, (1 + n) / (10 + n)), so the
+    average covers the recent part of any run instead of keeping a short run close to its start."""
+    @torch.no_grad()
+    def update(averaged: List[torch.Tensor], current: List[torch.Tensor], num_averaged: torch.Tensor):
+        updates = int(num_averaged)
+        step_decay = min(decay, (1 + updates) / (10 + updates))
+        if torch.is_floating_point(averaged[0]):
+            torch._foreach_lerp_(averaged, current, 1 - step_decay)
+        else:
+            torch._foreach_copy_(averaged, current)
+    return update
+
+
 def to_display_image(images: torch.Tensor) -> torch.Tensor:
     if images.dtype == torch.uint8:
         return images.detach().float().cpu() / 255.0
@@ -1585,6 +1599,7 @@ class DeepOCR(nn.Module):
         select_on_decoder: bool = False,
         save_best_of_heads: bool = False,
         ema_decay: float = 0.999,
+        ema_warmup: bool = False,
         mask_ratio_final: Optional[float] = None,
         rescore_alpha: float = 0.3,
         rescore_beta: float = 0.0,
@@ -1607,7 +1622,8 @@ class DeepOCR(nn.Module):
 
         # EMA of weights and buffers (BN stats included); validation and checkpoints use the
         # EMA copy. Updated on all ranks so distributed validation sees identical weights.
-        ema_model = AveragedModel(self, multi_avg_fn=get_ema_multi_avg_fn(ema_decay), use_buffers=True)
+        average = ema_with_warmup(ema_decay) if ema_warmup else get_ema_multi_avg_fn(ema_decay)
+        ema_model = AveragedModel(self, multi_avg_fn=average, use_buffers=True)
         eval_module = ema_model.module
 
         base_mask_ratio = self.mask_ratio

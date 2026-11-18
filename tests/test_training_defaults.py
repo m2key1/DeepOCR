@@ -9,6 +9,9 @@ class TrainingDefaults(unittest.TestCase):
         self.assertIs(train.DECODER_READS_UNMASKED, True)
         self.assertEqual(train.NEGATIVE_LINE_PROB, 0.03)
 
+    def test_a_short_run_saves_its_own_weights(self):
+        self.assertIs(train.EMA_WARMUP, True)
+
 
 if __name__ == '__main__':
     unittest.main()
