@@ -93,10 +93,10 @@ DeepOCR v4 has 459.0M parameters, 305.6M of them in the subword decoder; the def
 |---|---|
 | Input | RGB line image, height 256, width up to 6144 px (width-bucketed batching) |
 | Backbone | `cnn_grouped` (default, 4.2M params, grouped 3x3 blocks, stride 32 in height and 8 in width). `cnn`, `dinov3` and `trocr` are selectable; the last two need `transformers` |
-| Encoder | 4 MoE transformer layers, d_model 512, 8 heads. 62 SwiGLU experts plus 2 convolutional ones, top-8 routing, 1 shared expert, loss-free bias balancing, DropPath, span masking during training. |
+| Encoder | 4 MoE transformer layers, d_model 512, 8 heads. 62 SwiGLU experts plus 2 convolutional ones, top-8 routing, 1 shared expert, loss-free bias balancing, DropPath, span masking during training (a hidden column keeps its position and convention flags). |
 | Conditioning | Per-line flags for long s, the Fraktur oblique hyphen and typographic punctuation (v4 adds written-out abbreviations), measured per corpus by `scripts/audit_conventions.py`; `CONVENTION` in `infer.py` picks which convention to emit |
-| CTC head | Linear + log-softmax, CTC loss with entropy smoothing |
-| Decoder | 4-layer transformer decoder (teacher-forced cross-entropy, label smoothing), optionally initialised from a pretrained character LM. Or a subword decoder (`DECODER_TYPE = 'token'`): an OLMo 3 language model that reads the encoder through new cross-attention layers |
+| CTC head | Linear + log-softmax, CTC loss (`CTC_ENTROPY_WEIGHT` adds an entropy bonus, off by default because it flattens the head's confidence) |
+| Decoder | 4-layer transformer decoder (teacher-forced cross-entropy on an unmasked pass of the encoder, label smoothing), optionally initialised from a pretrained character LM. Or a subword decoder (`DECODER_TYPE = 'token'`): an OLMo 3 language model that reads the encoder through new cross-attention layers |
 | Vocabulary | Byte-level: 5 specials + 256 byte values, token id = 5 + byte |
 | Decoding | Greedy CTC, CTC beam search with a fused KenLM (torchaudio/flashlight), optional n-best rescoring with the decoder. A subword decoder reads the line itself: its beam search, each candidate reranked by how well the CTC head reads it |
 
@@ -186,7 +186,9 @@ Each run writes to `runs/ocr_<timestamp>/`: `best_model.pt` (selected on validat
 
 Each epoch draws every corpus in proportion to the square root of its size (`CORPUS_SAMPLING_ALPHA`), so large corpora are subsampled, in an order that reaches all their lines over several epochs, and small ones repeat at most `CORPUS_MAX_REPEAT` times.
 
-Validation reports greedy CER/WER every epoch, overall and per source dataset; beam search and decoder rescoring run every `BEAM_VAL_FREQUENCY` / `DECODER_VAL_FREQUENCY` epochs.
+Training hides spans of columns from the encoder and the CTC head, while the decoder learns from a second, unmasked pass of the encoder, so it is never rewarded for writing text it cannot see. A share of lines (`NEGATIVE_LINE_PROB`, 3%) is replaced by bare paper or the line turned upside down, with an empty target. The saved weights are an exponential moving average whose decay grows with the step count (`EMA_WARMUP`), so a short fine-tune saves its own weights rather than mostly its base's. A fine-tune from a checkpoint whose subword decoder is already trained runs that decoder at 1e-5.
+
+Validation reports greedy CTC CER/WER every epoch and the decoder's every `DECODER_VAL_FREQUENCY` epochs, overall and per source dataset. The decoder is scored as inference reads it: a subword decoder by its beam, reranked by the CTC head. KenLM beam search and decoder rescoring run every `BEAM_VAL_FREQUENCY` epochs.
 
 </details>
 
