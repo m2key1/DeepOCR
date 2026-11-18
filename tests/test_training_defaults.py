@@ -12,6 +12,9 @@ class TrainingDefaults(unittest.TestCase):
     def test_a_short_run_saves_its_own_weights(self):
         self.assertIs(train.EMA_WARMUP, True)
 
+    def test_the_ctc_head_trains_without_an_entropy_bonus(self):
+        self.assertEqual(train.CTC_ENTROPY_WEIGHT, 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()

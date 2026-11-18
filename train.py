@@ -152,7 +152,8 @@ GRAD_ACCUM_STEPS = 1
 # The cosine schedule only anneals if the run finishes, so pick a count the job time limit allows.
 EPOCHS = 60
 BACKBONE_BASE_LR = 1e-4
-CTC_ENTROPY_WEIGHT = 0.1
+# An entropy bonus flattens the CTC head's distribution, and with it the confidence the head reports.
+CTC_ENTROPY_WEIGHT = 0.0
 DECODER_BASE_LR = 1e-4
 DISABLE_AUG_AFTER_EPOCH = None
 EMA_DECAY = 0.999
