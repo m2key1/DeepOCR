@@ -134,10 +134,11 @@ TOKEN_DECODER_NEW_LR = 3e-4
 # Share of teacher-forced input tokens swapped for random ones, so the decoder reads the image
 # instead of continuing the text.
 TOKEN_DECODER_INPUT_NOISE = 0.1
-# A base whose token decoder is already trained fine-tunes with the settings it was trained with;
-# a TRAIN_* value the run sets itself still wins.
-TOKEN_BASE_FINETUNE = {'TOKEN_DECODER_NEW_LR': 1e-4, 'SELECT_ON_DECODER': True, 'DECODER_LABEL_SMOOTHING': 0.0,
-                       'DECODER_DROPOUT': 0.0}
+# A base whose token decoder is already trained fine-tunes with the settings it was trained with, and with
+# a slow decoder, which otherwise learns a collection's text faster than it learns to read it. A TRAIN_*
+# value the run sets itself still wins.
+TOKEN_BASE_FINETUNE = {'TOKEN_DECODER_NEW_LR': 1e-5, 'DECODER_BASE_LR': 1e-5, 'SELECT_ON_DECODER': True,
+                       'DECODER_LABEL_SMOOTHING': 0.0, 'DECODER_DROPOUT': 0.0}
 # Trains the decoder alone; the CTC head and the encoder it reads stay exactly as warm-started.
 FREEZE_ENCODER = False
 SAVE_BEST_OF_HEADS = False

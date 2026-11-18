@@ -238,7 +238,8 @@ class FineTuneKeepsTheBaseDecoder(unittest.TestCase):
     def test_a_token_decoder_base_fine_tunes_with_the_settings_it_was_trained_with(self):
         self.configure({'decoder_type': 'token', 'token_decoder_config': self.CONFIG,
                         'token_decoder_tokenizer': 'tokenizer json'})
-        self.assertEqual(train.TOKEN_DECODER_NEW_LR, 1e-4)
+        self.assertEqual(train.TOKEN_DECODER_NEW_LR, 1e-5)
+        self.assertEqual(train.DECODER_BASE_LR, 1e-5)
         self.assertIs(train.SELECT_ON_DECODER, True)
         self.assertEqual(train.DECODER_LABEL_SMOOTHING, 0.0)
         self.assertEqual(train.DECODER_DROPOUT, 0.0)
@@ -246,6 +247,7 @@ class FineTuneKeepsTheBaseDecoder(unittest.TestCase):
     def test_a_character_decoder_base_keeps_the_usual_settings(self):
         self.configure({'decoder_type': 'char'})
         self.assertEqual(train.TOKEN_DECODER_NEW_LR, 3e-4)
+        self.assertEqual(train.DECODER_BASE_LR, 1e-4)
         self.assertIs(train.SELECT_ON_DECODER, False)
         self.assertEqual(train.DECODER_LABEL_SMOOTHING, 0.1)
         self.assertEqual(train.DECODER_DROPOUT, 0.1)
