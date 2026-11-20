@@ -228,7 +228,7 @@ The same module is the Python API shown in the quickstart. Besides `transcribe_b
 <details>
 <summary><b>Pretrained model</b></summary>
 
-[DeepOCR v4](https://huggingface.co/M2key1/deepocr-v4) (Apache-2.0): v3 fine-tuned with the subword decoder, read with `transcribe(..., use_decoder=True)`. On unseen handwritten letters from around 1900 it gets 4.6% of characters wrong, where v3 gets 9.4%.
+[DeepOCR v4.1](https://huggingface.co/M2key1/deepocr-v4) (Apache-2.0): v3 fine-tuned with the subword decoder, then trained further on more collections with the current defaults. Read it with `transcribe(..., use_decoder=True)`. On unseen handwritten letters from around 1900 it gets 4.0% of characters wrong, where v4 gets 4.5% and v3 9.2%. The v4 weights stay under the repository's `v4.0` tag.
 
 [DeepOCR v3](https://huggingface.co/M2key1/deepocr-v3) (Apache-2.0): the default architecture, trained from scratch on public datasets of historical print and handwriting, with its own KenLM. 3.0% CER on its validation split with beam search and the LM. To fine-tune it, see "Fine-tuning on your own lines".
 
